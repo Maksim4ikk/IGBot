@@ -10,6 +10,7 @@ object BotEngine {
 
     @Synchronized
     fun ensureInit(context: Context) {
+        WebLiker.appContext = context.applicationContext
         if (!Python.isStarted()) {
             Python.start(AndroidPlatform(context.applicationContext))
         }

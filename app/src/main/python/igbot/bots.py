@@ -470,15 +470,47 @@ class MainWorker(BaseBot):
                 if not self.limiter.wait_for_slot("like"):
                     continue
                 try:
-                    if self.api(self.cl.media_like, media_id):
+                    outcome = self._like_post(media_id, media_code)
+                    if outcome == "liked":
                         self.db.log_action(self.username, "like")
                         log.info("[Воркер] ❤️ @%s: лайк на %s (%d/%d)",
                                  uname, media_code or media_id, self.limiter.used_today("like"), self.limiter.per_day("like"))
                         did_any = True
+                    elif outcome == "already_liked":
+                        log.info("[Воркер] @%s: пост уже лайкнутий — пропускаю", uname)
                 except (ApiError, UserNotFound, MediaNotFound) as e:
                     log.warning("[Воркер] Не вдалося поставити лайк @%s (%s)", uname, e)
                     continue
         return did_any
+
+    def _like_post(self, media_id: str, media_code: str = "") -> str:
+        """Лайк через WebView (REST /web/likes/.../like/ більше не існує — 404).
+        Повертає: liked | already_liked | skipped."""
+        code = (media_code or "").strip()
+        if not code:
+            try:
+                code = WebInstaClient.pk_to_shortcode(int(str(media_id).split("_")[0]))
+            except (TypeError, ValueError):
+                log.warning("[Воркер] Не вдалося визначити посилання з media_id=%s", media_id)
+                return "skipped"
+        url = f"https://www.instagram.com/p/{code}/"
+        try:
+            from java import jclass  # доступно лише в Chaquopy (Android)
+        except ImportError:
+            return "liked" if self.api(self.cl.media_like, media_id) else "skipped"
+
+        cookies = {c.name: c.value for c in self.cl.session.cookies if c.value}
+        raw = jclass("com.maks.igbot.data.WebLiker").like(url, self.cfg.web_user_agent or "", json.dumps(cookies))
+        res = json.loads(str(raw))
+        status, detail = res.get("status"), res.get("detail", "")
+        if status == "liked":
+            return "liked"
+        if status == "already_liked":
+            return "already_liked"
+        if status == "login_required":
+            raise StopWork("WebView не авторизований в Instagram — увійдіть в основний акаунт у вкладці Акаунти")
+        log.warning("[Воркер] Лайк через WebView не підтверджено: %s (%s)", status, detail)
+        return "skipped"
 
     def _after_target(self) -> None:
         c = self.cfg

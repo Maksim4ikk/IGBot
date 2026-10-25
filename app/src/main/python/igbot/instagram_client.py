@@ -253,6 +253,18 @@ class WebInstaClient:
             pk = pk * 64 + alphabet.index(ch)
         return pk
 
+    @staticmethod
+    def pk_to_shortcode(pk: int) -> str:
+        alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+        pk = int(pk)
+        if pk <= 0:
+            raise ValueError("pk має бути додатним")
+        out = ""
+        while pk:
+            pk, r = divmod(pk, 64)
+            out = alphabet[r] + out
+        return out
+
     @classmethod
     def media_pk_from_url(cls, url: str) -> int:
         m = re.search(r"/(?:p|reel|tv)/([A-Za-z0-9_-]+)", url)
