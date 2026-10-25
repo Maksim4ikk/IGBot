@@ -19,8 +19,7 @@ from .utils import build_stop_regex, fmt_secs, human_pause, nap, pick_latest
 
 
 class BaseBot:
-    delay_override: Optional[list] = None   # перевизначається в нащадках
-    # Валідацію сесії виконує перший робочий запит, без окремого /users/{id}/info/.
+    delay_override: Optional[list] = None
     verify_session_on_start = False
 
     def __init__(self, cfg: Settings, db: Database, username: str, password: str,
@@ -53,8 +52,6 @@ class BaseBot:
         if raw and float(raw) > time.time():
             left = float(raw) - time.time()
             raise StopWork(f"@{self.username} на паузі після блоку ще {fmt_secs(left)}")
-        # Cooldown зберігається в БД: перезапуск застосунку чи парсера
-        # не повинен скидати паузу та одразу повторювати запит до Instagram.
         raw_until = self.db.get_meta(f"rate_limit_until:{self.username}")
         try:
             until = float(raw_until or "0")
@@ -76,10 +73,16 @@ class BaseBot:
                 log.info("[%s] Перевірка збереженої сесії...", self.username)
                 self.cl.load_settings(self.session_path)
                 saved_sid = self.cl._cookie("sessionid")
-                if self.sessionid and saved_sid and saved_sid != unquote(self.sessionid):
-                    raise LoginRequired("у налаштуваннях новий sessionid")
-                if self.verify_session_on_start:
+                if self.sessionid:
+                    clean_sid = unquote(self.sessionid)
+                    if not saved_sid or saved_sid != clean_sid:
+                        self.cl.session.cookies.set("sessionid", clean_sid, domain=".instagram.com")
+                        if ":" in clean_sid:
+                            self.cl.session.cookies.set("ds_user_id", clean_sid.split(":")[0], domain=".instagram.com")
+                if not self.cl._cookie("csrftoken"):
                     self.cl._bootstrap_csrf()
+                    self.save_session()
+                if self.verify_session_on_start:
                     self.api(self.cl.verify_session)
                 log.info("[%s] Сесію завантажено!", self.username)
                 return
@@ -107,8 +110,6 @@ class BaseBot:
             log.info("[%s] Вхід за логіном та паролем...", self.username)
             self.cl.login(self.username, self.password)
 
-        # Перевірка робиться через той самий retry/backoff, що й запити парсера.
-        # Під час повторної авторизації api() сам повторить початковий запит.
         if verify and self.verify_session_on_start:
             self.api(self.cl.verify_session)
 
@@ -175,16 +176,17 @@ class BaseBot:
 
 
 class ScraperBot(BaseBot):
-    delay_override = [5.0, 10.0]
+    delay_override = [3.0, 6.0]
+    # True = профілі НЕ перевіряються (0 запитів до IG на анкету): беремо лише дані зі списку
+    # лайкерів/підписників (нікнейм, is_private). Пост для лайка шукає воркер.
+    # Коли запити профілів знову працюватимуть — поставте False.
+    LITE_MODE = True
+
+    def _evaluate_lite(self, uid: int, uname: str, full_name: str = ""):
+        return uname, "ready", self.preset_medias.get(uid)
 
     def __init__(self, cfg: Settings, db: Database):
-        # Автоматично очищаємо попередні блоки парсера при старті,
-        # щоб помилковий Action Block або 429 на /info/ не блокував роботу
-        uname = cfg.scraper_username.strip()
-        if uname:
-            db.set_meta(f"blocked_until:{uname}", "0")
-            db.set_meta(f"rate_limit_until:{uname}", "0")
-            db.set_meta(f"rate_limit_streak:{uname}", "0")
+        # Блоки/паузи (429, Action Block) тут НЕ скидаємо: зняти їх можна вручну через unlock_all()
 
         super().__init__(
             cfg, db,
@@ -195,7 +197,6 @@ class ScraperBot(BaseBot):
             sessionid=cfg.scraper_sessionid,
         )
         self.stop_re = build_stop_regex(self.cfg.stop_words)
-        self.fast_mode = False
         self.preset_medias: dict[int, MediaItem] = {}
 
     def scrape(self, source_type: str, target: str, amount: int = 100) -> None:
@@ -223,28 +224,28 @@ class ScraperBot(BaseBot):
                     self.preset_medias[m.user.pk] = m
             self._process(list(seen.values()), f"hashtag:{tag}")
 
-    def _evaluate(self, uid: int, uname: str):
-        preset_media = self.preset_medias.get(uid)
-        if self.fast_mode:
-            return uname, "ready", preset_media
-
+    def _evaluate(self, uid: int, uname: str, full_name: str = ""):
         c = self.cfg
-        try:
-            info = self.cl.user_info(uid)
-        except (PleaseWaitFewMinutes, FeedbackRequired, ApiError) as e:
-            self.fast_mode = True
-            log.warning(
-                "[Парсер] Instagram обмежив детальні запити анкет (%s) — вмикаю безпечний режим швидкого збереження!",
-                e,
-            )
-            return uname, "ready", preset_media
-
+        info = self.cl.user_info(uid, username=uname, full_name=full_name)
         name = info.username or uname
+
+        # Діагностика: одразу видно, які цифри бачить фільтр (-1 = невідомо)
+        log.info("[Парсер] @%s: posts=%s followers=%s following=%s private=%s",
+                 name, info.media_count, info.follower_count, info.following_count, info.is_private)
+
         if info.is_private:
             return name, "skipped_private", None
-        if (info.media_count < max(1, c.min_posts) or info.following_count > c.max_following
-                or info.follower_count > c.max_followers or info.follower_count < c.min_followers):
+
+        # ВИПРАВЛЕНО: -1 означає "невідомо", а не "0 постів" — такі анкети не відсікаємо
+        if 0 <= info.media_count < max(1, c.min_posts):
             return name, "skipped_numbers", None
+
+        # Перевіряємо підписників/підписки, якщо вони відомі (>= 0)
+        if info.follower_count >= 0:
+            if (info.following_count > c.max_following
+                    or info.follower_count > c.max_followers
+                    or info.follower_count < c.min_followers):
+                return name, "skipped_numbers", None
         if c.skip_business and info.is_business:
             return name, "skipped_commercial", None
         if self.stop_re:
@@ -252,19 +253,12 @@ class ScraperBot(BaseBot):
             if self.stop_re.search(text):
                 return name, "skipped_commercial", None
 
+        preset_media = self.preset_medias.get(uid)
         if preset_media is not None:
             return name, "ready", preset_media
 
-        try:
-            latest = pick_latest(self.cl.user_medias(uid, amount=4, username=name))
-        except (PleaseWaitFewMinutes, FeedbackRequired, ApiError) as e:
-            self.fast_mode = True
-            log.warning(
-                "[Парсер] Ліміт на стрічку постів (%s) — зберігаю анкети у швидкому режимі!",
-                e,
-            )
-            return name, "ready", None
-
+        # Отримуємо останній пост (без нього анкета НІКОЛИ не додається в ready!)
+        latest = pick_latest(self.cl.user_medias(uid, amount=4, username=name))
         if latest is None:
             return name, "skipped_dead", None
         return name, "ready", latest
@@ -272,6 +266,8 @@ class ScraperBot(BaseBot):
     def _process(self, cands: list[UserShort], source: str) -> None:
         new = [u for u in cands if not self.db.exists(u.pk)]
         log.info("[Парсер] Отримано %d анкет (нових: %d)", len(cands), len(new))
+        if self.LITE_MODE:
+            log.info("[Парсер] Швидкий режим: профілі не перевіряються, пост шукатиме воркер")
         counter = Counter()
         since_break = 0
         fail_streak = 0
@@ -297,10 +293,12 @@ class ScraperBot(BaseBot):
                     continue
 
                 try:
-                    name, status, media = self._evaluate(uid, uname)
+                    if self.LITE_MODE:
+                        name, status, media = self._evaluate_lite(uid, uname, u.full_name)
+                    else:
+                        name, status, media = self.api(self._evaluate, uid, uname, u.full_name)
                     fail_streak = 0
                 except UserNotFound as e:
-                    # справжній 404: акаунт видалено/недоступний
                     log.warning("[Парсер] [%d/%d] @%s недоступний (%s)", i, len(new), uname, e)
                     self.db.add_target(uid, uname, "skipped_dead", source)
                     counter["skipped_dead"] += 1
@@ -312,8 +310,8 @@ class ScraperBot(BaseBot):
                     counter["error"] += 1
                     log.error("[Парсер] [%d/%d] @%s помилка: %s", i, len(new), uname, e)
                     if fail_streak >= 5:
-                        raise StopWork("5 помилок поспіль — зупиняю парсер. Дивіться рядки 'IG fail'/'IG не-JSON' у логах.")
-                    human_pause(6, 12, self.stop_event)
+                        raise StopWork("5 помилок поспіль — зупиняю парсер.")
+                    human_pause(4, 8, self.stop_event)
                     continue
 
                 self.db.add_target(uid, name, status, source,
@@ -321,9 +319,8 @@ class ScraperBot(BaseBot):
                 counter[status] += 1
                 log.info("[Парсер] [%d/%d] @%s -> %s", i, len(new), name, status)
 
-                # У швидкому режимі запити до Instagram не виконуються, тому затримка не потрібна
-                if self.fast_mode:
-                    continue
+                if self.LITE_MODE:
+                    continue  # запитів не було — паузи й перерви не потрібні
 
                 since_break += 1
                 if since_break >= next_break and i < len(new):
@@ -337,14 +334,22 @@ class ScraperBot(BaseBot):
         finally:
             self.save_session()
             log.info(
-                "[Парсер] Завершено! ready: %d | приватних: %d | комерції: %d | за цифрами: %d | помилок: %d",
+                "[Парсер] Завершено! ready: %d | приватних: %d | комерції: %d | за цифрами/без постів: %d | помилок: %d",
                 counter["ready"], counter["skipped_private"],
-                counter["skipped_commercial"], counter["skipped_numbers"], counter["error"]
-            )
+                counter["skipped_commercial"],
+                counter["skipped_numbers"] + counter["skipped_dead"],
+                counter["error"],
+                )
 
 
 class MainWorker(BaseBot):
     def __init__(self, cfg: Settings, db: Database):
+        uname = cfg.main_username.strip()
+        if uname:
+            db.set_meta(f"blocked_until:{uname}", "0")
+            db.set_meta(f"rate_limit_until:{uname}", "0")
+            db.set_meta(f"rate_limit_streak:{uname}", "0")
+
         super().__init__(
             cfg, db,
             username=cfg.main_username,
@@ -438,10 +443,10 @@ class MainWorker(BaseBot):
                 if not self.limiter.wait_for_slot("story"):
                     continue
                 try:
-                    stories = self.api(self.cl.user_stories, uid)[: c.max_stories_per_user]
+                    stories = self.cl.user_stories(uid)[: c.max_stories_per_user]
                     if not stories:
                         continue
-                    self.api(self.cl.story_seen, stories)
+                    self.cl.story_seen(stories)
                     self.db.log_action(self.username, "story", len(stories))
                     log.info("[Воркер] 👁 @%s: переглянуто %d сторіс", uname, len(stories))
                     did_any = True
@@ -451,18 +456,20 @@ class MainWorker(BaseBot):
             else:
                 if not media_id:
                     try:
-                        latest = pick_latest(self.cl.user_medias(uid, amount=2, username=uname))
-                        if latest:
-                            media_id, media_code = str(latest.id), str(latest.code)
-                    except (PleaseWaitFewMinutes, FeedbackRequired, ApiError) as e:
-                        log.warning("[Воркер] Не вдалося отримати пост @%s (%s)", uname, e)
+                        medias = self.api(self.cl.user_medias, uid, amount=2, username=uname)
+                    except ApiError as e:
+                        log.info("[Воркер] @%s: не вдалося отримати пости (%s) — пропускаю лайк", uname, e)
                         continue
-                if not media_id:
-                    continue
+                    latest = pick_latest(medias)
+                    if latest:
+                        media_id, media_code = str(latest.id), str(latest.code)
+                    else:
+                        log.info("[Воркер] @%s не має постів — пропускаю", uname)
+                        continue
                 if not self.limiter.wait_for_slot("like"):
                     continue
                 try:
-                    if self.api(self.cl.media_like, media_id):
+                    if self.cl.media_like(media_id):
                         self.db.log_action(self.username, "like")
                         log.info("[Воркер] ❤️ @%s: лайк на %s (%d/%d)",
                                  uname, media_code or media_id, self.limiter.used_today("like"), self.limiter.per_day("like"))

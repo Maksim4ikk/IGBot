@@ -118,5 +118,8 @@ class Database:
         self.conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?,?)", (key, value))
 
     def clear_blocks(self) -> int:
-        return self.conn.execute("DELETE FROM meta WHERE key LIKE 'blocked_until:%'").rowcount
+        return self.conn.execute(
+            "DELETE FROM meta WHERE key LIKE 'blocked_until:%' "
+            "OR key LIKE 'rate_limit_until:%' OR key LIKE 'rate_limit_streak:%'"
+        ).rowcount
 

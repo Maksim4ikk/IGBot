@@ -108,6 +108,10 @@ def unlock_all() -> None:
     r = db.retry_errors()
     g = db.conn.execute("DELETE FROM targets WHERE status='gone'").rowcount
     log.info("Розблоковано: %d, завислих: %d, помилок: %d, відновлено gone: %d", b, s, r, g)
+    n = db.conn.execute(
+        "DELETE FROM targets WHERE status IN ('skipped_numbers','skipped_dead')"
+    ).rowcount
+    log.info("Видалено %d анкет для повторної перевірки", n)
 
     # ════════════════════════════════════════════════════════════════════
 # Акаунти: збереження після входу через WebView / вихід
