@@ -412,6 +412,7 @@ class MainWorker(BaseBot):
             self.db.release(uid)
             raise
         except (UserNotFound, MediaNotFound) as e:
+            log.warning("[Воркер] @%s: 404/не знайдено (%s) — позначено gone", t["username"], e)
             self.db.complete(uid, "gone", str(e)[:200])
             return
         except Exception as e:
@@ -443,14 +444,14 @@ class MainWorker(BaseBot):
                 if not self.limiter.wait_for_slot("story"):
                     continue
                 try:
-                    stories = self.cl.user_stories(uid)[: c.max_stories_per_user]
+                    stories = self.api(self.cl.user_stories, uid)[: c.max_stories_per_user]
                     if not stories:
                         continue
-                    self.cl.story_seen(stories)
+                    self.api(self.cl.story_seen, stories)
                     self.db.log_action(self.username, "story", len(stories))
                     log.info("[Воркер] 👁 @%s: переглянуто %d сторіс", uname, len(stories))
                     did_any = True
-                except (ApiError, PleaseWaitFewMinutes, FeedbackRequired) as e:
+                except (ApiError, UserNotFound, MediaNotFound) as e:
                     log.warning("[Воркер] Пропускаю сторіс @%s (%s)", uname, e)
                     continue
             else:
@@ -469,12 +470,12 @@ class MainWorker(BaseBot):
                 if not self.limiter.wait_for_slot("like"):
                     continue
                 try:
-                    if self.cl.media_like(media_id):
+                    if self.api(self.cl.media_like, media_id):
                         self.db.log_action(self.username, "like")
                         log.info("[Воркер] ❤️ @%s: лайк на %s (%d/%d)",
                                  uname, media_code or media_id, self.limiter.used_today("like"), self.limiter.per_day("like"))
                         did_any = True
-                except (ApiError, PleaseWaitFewMinutes, FeedbackRequired) as e:
+                except (ApiError, UserNotFound, MediaNotFound) as e:
                     log.warning("[Воркер] Не вдалося поставити лайк @%s (%s)", uname, e)
                     continue
         return did_any

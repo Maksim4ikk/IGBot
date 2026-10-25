@@ -77,4 +77,15 @@ object BotEngine {
     fun logoutAccount(context: Context, kind: String) {
         module(context).callAttr("logout_account", kind)
     }
+
+    /** Імпорт черги з JSON-файлу (команда export на ПК). Повертає {added, skipped, total}. */
+    fun importTargets(context: Context, rawJson: String): JSONObject {
+        val raw = module(context).callAttr("import_targets_json", rawJson).toString()
+        return JSONObject(raw)
+    }
+
+    /** Записати рядок у журнал подій (Python-лог). */
+    fun logExternal(context: Context, message: String) {
+        module(context).callAttr("log_external", message)
+    }
 }

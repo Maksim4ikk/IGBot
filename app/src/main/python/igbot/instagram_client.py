@@ -143,7 +143,7 @@ class WebInstaClient:
         resp = self.session.request(method, url, headers=headers, timeout=25, **kwargs)
 
         if resp.status_code == 404:
-            raise UserNotFound(f"404 Not Found ({url.split('?')[0][-40:]})")
+            raise UserNotFound(f"404 Not Found: {method} {url.split('?')[0].removeprefix(self.BASE)[:90]}")
         if resp.status_code == 429:
             retry_after = resp.headers.get("Retry-After", "").strip()
             retry_seconds = int(retry_after) if retry_after.isdigit() else None
@@ -610,12 +610,13 @@ class WebInstaClient:
                                 taken_at=int(s.get("taken_at_timestamp", time.time())),
                             ))
                 return stories
-        except (ApiError, PleaseWaitFewMinutes, FeedbackRequired):
-            pass
+        except (ApiError, PleaseWaitFewMinutes, FeedbackRequired, UserNotFound) as e:
+            log.info("[IG] сторіс graphql не вдалося: %s", e)
 
         try:
             data = self._req("GET", f"{self.API}/feed/reels_media/?reel_ids={uid}", quiet_html=True)
-        except (ApiError, PleaseWaitFewMinutes, FeedbackRequired):
+        except (ApiError, PleaseWaitFewMinutes, FeedbackRequired, UserNotFound) as e:
+            log.info("[IG] сторіс reels_media не вдалося: %s", e)
             return []
 
         raw: list = []

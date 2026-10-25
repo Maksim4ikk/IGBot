@@ -3,6 +3,8 @@ package com.maks.igbot.ui.scraper
 import android.content.Context
 import android.content.Intent
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -24,6 +26,7 @@ import com.maks.igbot.ui.components.ScreenHeader
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 // ════════════════════════════════════════════════════════════════════
 // ВКЛАДКА 2: ПАРСЕР АУДИТОРІЇ
@@ -33,6 +36,28 @@ fun ScraperScreen(context: Context, scraperRunning: Boolean, scraperTask: String
     var sourceType by remember { mutableStateOf("followers") }
     var targetInput by remember { mutableStateOf("") }
     var amountInput by remember { mutableStateOf("100") }
+    val importScope = rememberCoroutineScope()
+    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            importScope.launch {
+                try {
+                    val res = withContext(Dispatchers.IO) {
+                        val text = context.contentResolver.openInputStream(uri)
+                            ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
+                            ?: throw IllegalStateException("Не вдалося прочитати файл")
+                        BotEngine.importTargets(context, text)
+                    }
+                    Toast.makeText(
+                        context,
+                        "Імпортовано: ${res.optInt("added")}, пропущено: ${res.optInt("skipped")} (з ${res.optInt("total")})",
+                        Toast.LENGTH_LONG
+                    ).show()
+                } catch (e: Exception) {
+                    Toast.makeText(context, "Помилка імпорту: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -126,6 +151,19 @@ fun ScraperScreen(context: Context, scraperRunning: Boolean, scraperTask: String
             ) {
                 Text("Зупинити поточний парсинг", color = MaterialTheme.colorScheme.error)
             }
+        }
+
+        HorizontalDivider()
+        Text(
+            "Або завантажте готову чергу, зібрану на ПК (файл targets.json):",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        OutlinedButton(
+            onClick = { importLauncher.launch(arrayOf("*/*")) },
+            modifier = Modifier.fillMaxWidth().height(50.dp)
+        ) {
+            Text("Імпортувати чергу з JSON")
         }
     }
 }

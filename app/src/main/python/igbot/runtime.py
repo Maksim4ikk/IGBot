@@ -85,6 +85,53 @@ def get_dashboard_json() -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+def import_targets_json(raw_json: str) -> str:
+    """Імпорт черги з JSON, який зробила команда `igbot.py export` на ПК.
+    Нові цілі додаються як 'ready' з готовим постом; наявні, які ще не оброблені
+    успішно, оновлюються. Уже 'interacted' не чіпаємо."""
+    data = json.loads(raw_json)
+    items = data.get("items") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        raise ValueError("Невірний формат JSON: очікується список items")
+    db = Database()
+    now = time.time()
+    added = skipped = 0
+    for it in items:
+        try:
+            uid = int(it["user_id"])
+            media_id = str(it["media_id"]).strip()
+            media_code = str(it.get("media_code") or "").strip()
+            username = str(it.get("username") or "").strip()
+            source = str(it.get("source") or "import")
+        except (KeyError, TypeError, ValueError, AttributeError):
+            skipped += 1
+            continue
+        if not media_id:
+            skipped += 1
+            continue
+        cur = db.conn.execute(
+            """INSERT INTO targets
+               (user_id, username, status, latest_media_id, latest_media_code, source, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?)
+               ON CONFLICT(user_id) DO UPDATE SET
+                 status='ready', latest_media_id=excluded.latest_media_id,
+                 latest_media_code=excluded.latest_media_code, attempts=0, last_error=NULL,
+                 updated_at=excluded.updated_at
+               WHERE targets.status IN ('ready','error','gone','skipped_dead','skipped_nothing','skipped_numbers')""",
+            (uid, username, "ready", media_id, media_code, source, now, now))
+        if cur.rowcount == 1:
+            added += 1
+        else:
+            skipped += 1
+    log.info("Імпорт з JSON: додано %d, пропущено %d (з %d)", added, skipped, len(items))
+    return json.dumps({"added": added, "skipped": skipped, "total": len(items)}, ensure_ascii=False)
+
+
+def log_external(message: str) -> None:
+    """Запис у журнал подій із Kotlin (тест мосту WebView)."""
+    log.info("%s", message)
+
+
 def get_settings_json() -> str:
     cfg = Settings.load()
     return json.dumps({f.name: getattr(cfg, f.name) for f in fields(Settings)}, ensure_ascii=False)
