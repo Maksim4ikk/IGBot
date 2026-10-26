@@ -1,5 +1,6 @@
 from __future__ import annotations
-import json, logging, random, re, threading, time
+import hashlib, json, logging, random, re, threading, time
+from datetime import datetime, timezone
 from collections import Counter
 from typing import Callable, Optional
 from urllib.parse import unquote
@@ -16,6 +17,16 @@ from .rate_limiter import RateLimiter
 from .settings import Settings
 from .state import log, STOP_SCRAPER, STOP_WORKER
 from .utils import build_stop_regex, fmt_secs, human_pause, nap, pick_latest
+
+
+# Зрозумілі підписи статусів для журналу (в БД лишаються технічні назви)
+STATUS_TEXT = {
+    "ready": "готово (є пост)",
+    "skipped_private": "приватний акаунт — пропущено",
+    "skipped_dead": "немає постів або недоступний — пропущено",
+    "skipped_commercial": "магазин/бізнес — пропущено",
+    "skipped_numbers": "не підходить за цифрами — пропущено",
+}
 
 
 class BaseBot:
@@ -177,13 +188,60 @@ class BaseBot:
 
 class ScraperBot(BaseBot):
     delay_override = [3.0, 6.0]
-    # True = профілі НЕ перевіряються (0 запитів до IG на анкету): беремо лише дані зі списку
-    # лайкерів/підписників (нікнейм, is_private). Пост для лайка шукає воркер.
-    # Коли запити профілів знову працюватимуть — поставте False.
-    LITE_MODE = True
+    # USE_WEBVIEW = True: останній пост кожного відкритого профілю береться зі сторінки профілю у WebView
+    # (як це робить людина), бо API-запити профілів Instagram блокує (429 / spam).
+    USE_WEBVIEW = True
+    # LITE_MODE = True: профілі взагалі не перевіряються (0 запитів), пост шукатиме воркер.
+    LITE_MODE = False
 
     def _evaluate_lite(self, uid: int, uname: str, full_name: str = ""):
         return uname, "ready", self.preset_medias.get(uid)
+
+    def _web_latest_post(self, username: str) -> dict:
+        """Сторінка профілю у WebView -> {"status", "codes", "detail"}."""
+        from java import jclass  # лише Chaquopy (Android)
+        cookies = {c.name: c.value for c in self.cl.session.cookies if c.value}
+        raw = jclass("com.maks.igbot.data.WebLiker").latestPost(
+            username, self.cfg.web_user_agent or "", json.dumps(cookies))
+        return json.loads(str(raw))
+
+    def _evaluate_web(self, uid: int, uname: str, full_name: str = ""):
+        preset = self.preset_medias.get(uid)
+        if preset is not None:
+            return uname, "ready", preset
+        try:
+            res = self._web_latest_post(uname)
+        except ImportError:
+            raise StopWork("Режим WebView працює лише в Android-застосунку")
+        status = res.get("status")
+
+        if status == "ok":
+            best = None  # найсвіжіший = найбільший pk (закріплені старі пости не заважають)
+            for code in str(res.get("codes", "")).split(","):
+                code = code.strip()
+                if not code:
+                    continue
+                try:
+                    pk = WebInstaClient.shortcode_to_pk(code)
+                except ValueError:
+                    continue
+                if best is None or pk > best[0]:
+                    best = (pk, code)
+            if best is None:
+                raise ApiError(f"@{uname}: не вдалося розібрати посилання на пости")
+            pk, code = best
+            ts = ((pk >> 23) + 1314220021721) / 1000  # час публікації закодований у pk
+            media = MediaItem(id=str(pk), pk=pk, code=code,
+                              taken_at=datetime.fromtimestamp(ts, tz=timezone.utc))
+            return uname, "ready", media
+        if status == "private":
+            return uname, "skipped_private", None
+        if status in ("no_posts", "not_found"):
+            return uname, "skipped_dead", None
+        if status == "login":
+            raise StopWork("WebView не авторизований в Instagram — увійдіть у технічний акаунт у вкладці Акаунти")
+        # unknown / timeout / error — НЕ записуємо в БД як "мертву" анкету
+        raise ApiError(f"@{uname}: профіль не прочитано ({status}: {res.get('detail', '')})")
 
     def __init__(self, cfg: Settings, db: Database):
         # Блоки/паузи (429, Action Block) тут НЕ скидаємо: зняти їх можна вручну через unlock_all()
@@ -199,14 +257,106 @@ class ScraperBot(BaseBot):
         self.stop_re = build_stop_regex(self.cfg.stop_words)
         self.preset_medias: dict[int, MediaItem] = {}
 
+    def _web_call(self, fn: str, *args) -> dict:
+        """Виклик функції Kotlin-класу WebLiker (сторінки Instagram у WebView). Лише Android."""
+        from java import jclass
+        cookies = {c.name: c.value for c in self.cl.session.cookies if c.value}
+        raw = getattr(jclass("com.maks.igbot.data.WebLiker"), fn)(
+            *args, self.cfg.web_user_agent or "", json.dumps(cookies))
+        return json.loads(str(raw))
+
+    def _resolve_user_id(self, uname: str) -> int:
+        """Числовий ID акаунта: читаємо зі сторінки профілю у WebView
+        (старий пошук /web/search/topsearch/ повертає 404)."""
+        try:
+            res = self._web_call("profileId", uname)
+        except ImportError:
+            return self.api(self.cl.user_id_from_username, uname)  # поза Android
+        st, detail = res.get("status"), res.get("detail", "")
+        if st == "ok":
+            return int(res["id"])
+        if st == "not_found":
+            raise StopWork(f"Акаунт @{uname} не знайдено")
+        if st == "login":
+            raise StopWork("WebView не авторизований в Instagram — увійдіть у технічний акаунт у вкладці Акаунти")
+        raise StopWork(f"Не вдалося визначити ID @{uname}: {st} ({detail})")
+
+    def _scrape_hashtag(self, tag: str, amount: int) -> None:
+        """Хештег: відкриваємо сторінку тегу у WebView, беремо пости, потім відкриваємо кожен пост
+        і дізнаємось автора. Лайкатимемо саме цей пост (він уже свіжий). Приватних тут не буває."""
+        log.info("[Парсер] Відкриваю хештег #%s у WebView...", tag)
+        try:
+            res = self._web_call("hashtagPosts", tag, int(amount))
+        except ImportError:
+            raise StopWork("Збір за хештегом працює лише в Android-застосунку")
+        st = res.get("status")
+        if st == "login":
+            raise StopWork("WebView не авторизований в Instagram — увійдіть у технічний акаунт у вкладці Акаунти")
+        codes = [c.strip() for c in str(res.get("codes", "")).split(",") if c.strip()][: int(amount)]
+        if not codes:
+            raise StopWork(f"Хештег #{tag}: постів не знайдено ({st}: {res.get('detail', '')})")
+        log.info("[Парсер] Знайдено постів за #%s: %d. Визначаю авторів (~10 с на пост)...", tag, len(codes))
+
+        cands: list[UserShort] = []
+        seen_names: set[str] = set()
+        fails = 0
+        for i, code in enumerate(codes, 1):
+            if self.stop_event.is_set():
+                break
+            r = self._web_call("postAuthor", code)
+            st = r.get("status")
+            if st == "login":
+                raise StopWork("WebView не авторизований в Instagram — увійдіть у технічний акаунт у вкладці Акаунти")
+            uname = str(r.get("username", "")).strip()
+            if st != "ok" or not uname:
+                fails += 1
+                log.warning("[Парсер] [%d/%d] пост %s: автора не визначено (%s: %s)",
+                            i, len(codes), code, st, r.get("detail", ""))
+                if fails >= 5:
+                    raise StopWork("Не вдалося визначити авторів 5 постів поспіль — зупиняю парсер.")
+                human_pause(self.cfg.scrape_delay_min, self.cfg.scrape_delay_max, self.stop_event)
+                continue
+            fails = 0
+            if uname.lower() in seen_names:
+                continue
+            seen_names.add(uname.lower())
+
+            try:
+                mpk = WebInstaClient.shortcode_to_pk(code)
+            except ValueError:
+                continue
+            uid = None
+            for s in str(r.get("ids", "")).split(","):
+                s = s.strip()
+                if s.isdigit() and len(s) <= 14 and int(s) != mpk:  # ID людей коротші за ID постів
+                    uid = int(s)
+                    break
+            if uid is None:  # справжній ID не знайшли — стабільний від'ємний ідентифікатор за нікнеймом
+                uid = -int(hashlib.sha1(uname.lower().encode("utf-8")).hexdigest()[:12], 16)
+            user = UserShort(pk=uid, username=uname, full_name="", is_private=False)
+            self.preset_medias[uid] = MediaItem(
+                id=str(mpk), pk=mpk, code=code, taken_at=datetime.now(tz=timezone.utc), user=user)
+            cands.append(user)
+            log.info("[Парсер] [%d/%d] пост %s -> @%s", i, len(codes), code, uname)
+            human_pause(self.cfg.scrape_delay_min, self.cfg.scrape_delay_max, self.stop_event)
+
+        self._process(cands, f"hashtag:{tag}")
+
     def scrape(self, source_type: str, target: str, amount: int = 100) -> None:
         target = target.strip()
         if source_type == "followers":
             uname = target.lstrip("@")
             log.info("[Парсер] Шукаю ID донора @%s...", uname)
-            uid = self.api(self.cl.user_id_from_username, uname)
+            uid = self._resolve_user_id(uname)
             log.info("[Парсер] ID @%s = %d. Завантажую підписників (до %d)...", uname, uid, amount)
-            followers, _ = self.api(self.cl.user_followers_v1_chunk, uid, max_amount=amount)
+            try:
+                followers, _ = self.api(self.cl.user_followers_v1_chunk, uid, max_amount=amount)
+            except (ApiError, UserNotFound) as e:
+                raise StopWork(f"Не вдалося отримати підписників @{uname}: {e}")
+            if not followers:
+                raise StopWork(f"Instagram повернув порожній список підписників @{uname} "
+                               "(акаунт приватний або список недоступний)")
+            log.info("[Парсер] Отримано %d підписників", len(followers))
             self._process(followers, f"followers:{uname}")
         elif source_type == "likers":
             pk = self.cl.media_pk_from_url(target)
@@ -214,15 +364,7 @@ class ScraperBot(BaseBot):
             likers = self.api(self.cl.media_likers, pk)
             self._process(likers[:amount], f"likers:{pk}")
         elif source_type == "hashtag":
-            tag = target.lstrip("#")
-            log.info("[Парсер] Завантажую пости за хештегом #%s...", tag)
-            medias = self.api(self.cl.hashtag_medias_recent, tag, amount=amount)
-            seen: dict[int, UserShort] = {}
-            for m in medias:
-                if m.user and m.user.pk not in seen:
-                    seen[m.user.pk] = m.user
-                    self.preset_medias[m.user.pk] = m
-            self._process(list(seen.values()), f"hashtag:{tag}")
+            self._scrape_hashtag(target.lstrip("#"), amount)
 
     def _evaluate(self, uid: int, uname: str, full_name: str = ""):
         c = self.cfg
@@ -266,7 +408,9 @@ class ScraperBot(BaseBot):
     def _process(self, cands: list[UserShort], source: str) -> None:
         new = [u for u in cands if not self.db.exists(u.pk)]
         log.info("[Парсер] Отримано %d анкет (нових: %d)", len(cands), len(new))
-        if self.LITE_MODE:
+        if self.USE_WEBVIEW:
+            log.info("[Парсер] Режим WebView: відкриваю профілі й беру останній пост")
+        elif self.LITE_MODE:
             log.info("[Парсер] Швидкий режим: профілі не перевіряються, пост шукатиме воркер")
         counter = Counter()
         since_break = 0
@@ -283,17 +427,20 @@ class ScraperBot(BaseBot):
                 if u.is_private is True:
                     self.db.add_target(uid, uname, "skipped_private", source)
                     counter["skipped_private"] += 1
+                    log.info("[Парсер] [%d/%d] @%s -> %s", i, len(new), uname, STATUS_TEXT["skipped_private"])
                     continue
 
                 # 2. Миттєве відсіювання магазинів за іменем (0 запитів до API)
                 if self.stop_re and self.stop_re.search(f"{uname} {u.full_name}"):
                     self.db.add_target(uid, uname, "skipped_commercial", source)
                     counter["skipped_commercial"] += 1
-                    log.info("[Парсер] [%d/%d] @%s -> skipped_commercial (за назвою)", i, len(new), uname)
+                    log.info("[Парсер] [%d/%d] @%s -> %s (за назвою)", i, len(new), uname, STATUS_TEXT["skipped_commercial"])
                     continue
 
                 try:
-                    if self.LITE_MODE:
+                    if self.USE_WEBVIEW:
+                        name, status, media = self._evaluate_web(uid, uname, u.full_name)
+                    elif self.LITE_MODE:
                         name, status, media = self._evaluate_lite(uid, uname, u.full_name)
                     else:
                         name, status, media = self.api(self._evaluate, uid, uname, u.full_name)
@@ -317,10 +464,12 @@ class ScraperBot(BaseBot):
                 self.db.add_target(uid, name, status, source,
                                    str(media.id) if media else None, str(media.code) if media else None)
                 counter[status] += 1
-                log.info("[Парсер] [%d/%d] @%s -> %s", i, len(new), name, status)
+                log.info("[Парсер] [%d/%d] @%s -> %s", i, len(new), name, STATUS_TEXT.get(status, status))
 
                 if self.LITE_MODE:
                     continue  # запитів не було — паузи й перерви не потрібні
+                if self.preset_medias.get(uid) is not None:
+                    continue  # пост відомий заздалегідь (хештег) — запиту не було, пауза не потрібна
 
                 since_break += 1
                 if since_break >= next_break and i < len(new):

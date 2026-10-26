@@ -35,7 +35,11 @@ import kotlinx.coroutines.withContext
 fun ScraperScreen(context: Context, scraperRunning: Boolean, scraperTask: String) {
     var sourceType by remember { mutableStateOf("followers") }
     var targetInput by remember { mutableStateOf("") }
-    var amountInput by remember { mutableStateOf("100") }
+    var amountInput by remember { mutableStateOf("50") }
+    LaunchedEffect(Unit) {
+        val cfg = withContext(Dispatchers.IO) { BotEngine.getSettingsJson(context) }
+        amountInput = cfg.optInt("scrape_amount", 50).toString()
+    }
     val importScope = rememberCoroutineScope()
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
@@ -107,16 +111,19 @@ fun ScraperScreen(context: Context, scraperRunning: Boolean, scraperTask: String
             singleLine = true
         )
 
-        if (sourceType != "likers") {
-            OutlinedTextField(
-                value = amountInput,
-                onValueChange = { amountInput = it.filter { ch -> ch.isDigit() } },
-                label = { Text("Скільки кандидатів перевірити (напр. 100)") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true
-            )
-        }
+        OutlinedTextField(
+            value = amountInput,
+            onValueChange = { amountInput = it.filter { ch -> ch.isDigit() } },
+            label = {
+                Text(
+                    if (sourceType == "hashtag") "Скільки постів переглянути (за замовчуванням — з «Ліміти»)"
+                    else "Скільки анкет зібрати (за замовчуванням — з «Ліміти»)"
+                )
+            },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true
+        )
 
         Button(
             onClick = {
@@ -124,7 +131,7 @@ fun ScraperScreen(context: Context, scraperRunning: Boolean, scraperTask: String
                     Toast.makeText(context, "Введіть ціль для парсингу!", Toast.LENGTH_SHORT).show()
                     return@Button
                 }
-                val amt = amountInput.toIntOrNull() ?: 100
+                val amt = amountInput.toIntOrNull() ?: 50
                 val intent = Intent(context, BotForegroundService::class.java).apply {
                     action = "START_SCRAPER"
                     putExtra("source_type", sourceType)

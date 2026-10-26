@@ -66,8 +66,9 @@ class Settings:
     min_followers: int = 0
     min_posts: int = 1
     skip_business: bool = True
-    scrape_delay_min: float = 3.0
-    scrape_delay_max: float = 6.0
+    scrape_amount: int = 50           # скільки анкет збирати за один запуск (за замовчуванням)
+    scrape_delay_min: float = 8.0     # пауза між анкетами, с
+    scrape_delay_max: float = 15.0
     scrape_break_every_min: int = 35
     scrape_break_every_max: int = 50
     scrape_break_minutes_min: float = 2.0

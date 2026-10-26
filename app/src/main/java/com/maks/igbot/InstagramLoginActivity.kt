@@ -35,6 +35,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
+import org.json.JSONTokener
 import kotlin.coroutines.resume
 
 /**
@@ -121,33 +122,69 @@ class UsernameBridge {
     }
 }
 
-/** Просить сам WebView отримати нікнейм (запит іде як від справжнього браузера). */
+// Резерв: нікнейм власника береться з посилання на профіль у навігації головної сторінки
+private val NAV_USERNAME_JS = """
+    (function () {
+      var SKIP = ['explore','reels','reel','direct','accounts','p','stories','notifications','about','legal',
+                  'privacy','terms','directory','developers','api','web','static','emails','challenge','session',
+                  'login','nametag','settings','create','ads','blog','help','tv','lite','topics','locations',
+                  'tags','archive','saved','activity','threads','meta','download','oauth'];
+      var best = '', bestScore = -1;
+      var links = document.querySelectorAll('a[href]');
+      for (var i = 0; i < links.length; i++) {
+        var a = links[i];
+        var m = /^\/([A-Za-z0-9._]{1,30})\/$/.exec(a.getAttribute('href') || '');
+        if (!m || SKIP.indexOf(m[1].toLowerCase()) >= 0) continue;
+        if (!a.closest('nav, [role="navigation"]')) continue;
+        var score = 1 + (a.querySelector('img') ? 2 : 0);
+        if (score > bestScore) { bestScore = score; best = m[1]; }
+      }
+      return best;
+    })();
+""".trimIndent()
+
+private val USERNAME_RE = Regex("[A-Za-z0-9._]{1,30}")
+
+/** Просить сам WebView отримати нікнейм: кілька ендпоінтів по черзі (запит іде як від справжнього браузера). */
 private suspend fun fetchUsernameInWebView(webView: WebView, bridge: UsernameBridge, uid: String): String {
     val safeUid = uid.filter { it.isDigit() }
     if (safeUid.isEmpty()) return ""
 
-    repeat(3) {
-        val deferred = CompletableDeferred<String>()
-        bridge.pending = deferred
-        withContext(Dispatchers.Main) {
-            val js = """
-                (function() {
-                  fetch('/api/v1/users/$safeUid/info/', {
-                    credentials: 'include',
-                    headers: {'X-IG-App-ID': '936619743392459', 'X-Requested-With': 'XMLHttpRequest'}
-                  })
-                  .then(function(r) { return r.json(); })
-                  .then(function(d) {
-                    AndroidBridge.onResult((d && d.user && d.user.username) ? d.user.username : '');
-                  })
-                  .catch(function() { AndroidBridge.onResult(''); });
-                })();
-            """.trimIndent()
-            webView.evaluateJavascript(js, null)
+    val deferred = CompletableDeferred<String>()
+    bridge.pending = deferred
+    withContext(Dispatchers.Main) {
+        val js = """
+            (function() {
+              function get(url, pick) {
+                return fetch(url, {credentials: 'include',
+                                   headers: {'X-IG-App-ID': '936619743392459', 'X-Requested-With': 'XMLHttpRequest'}})
+                  .then(function(r) { return r.ok ? r.json() : null; })
+                  .then(function(d) { try { return (d && pick(d)) || ''; } catch (e) { return ''; } })
+                  .catch(function() { return ''; });
+              }
+              get('/api/v1/accounts/edit/web_form_data/', function(d) { return d.form_data.username; })
+                .then(function(u) { return u || get('/api/v1/accounts/current_user/?edit=true', function(d) { return d.user.username; }); })
+                .then(function(u) { return u || get('/api/v1/users/$safeUid/info/', function(d) { return d.user.username; }); })
+                .then(function(u) { AndroidBridge.onResult(u || ''); });
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(js, null)
+    }
+    return withTimeoutOrNull(25000) { deferred.await() }.orEmpty()
+}
+
+/** Якщо API не віддало нікнейм (429) — читаємо його зі сторінки, як це робить людина. */
+private suspend fun findUsernameInDom(webView: WebView): String {
+    withContext(Dispatchers.Main) { webView.loadUrl("https://www.instagram.com/") }
+    for (i in 1..16) {
+        delay(1000)
+        val raw = withContext(Dispatchers.Main) {
+            suspendCancellableCoroutine<String> { cont ->
+                webView.evaluateJavascript(NAV_USERNAME_JS) { v -> if (cont.isActive) cont.resume(v ?: "null") }
+            }
         }
-        val name = withTimeoutOrNull(15000) { deferred.await() } ?: ""
-        if (name.isNotBlank()) return name
-        delay(2500)
+        val name = (JSONTokener(raw).nextValue() as? String).orEmpty()
+        if (USERNAME_RE.matches(name)) return name
     }
     return ""
 }
@@ -196,7 +233,9 @@ private fun LoginScreen(kind: String, onClose: () -> Unit, onDone: (String) -> U
 
         // Нікнейм беремо з WebView, поки він ще на екрані
         val wv = webViewRef
-        val username = if (wv != null) fetchUsernameInWebView(wv, bridge, uid) else ""
+        var username = if (wv != null) fetchUsernameInWebView(wv, bridge, uid) else ""
+        if (!USERNAME_RE.matches(username)) username = ""
+        if (username.isEmpty() && wv != null) username = findUsernameInDom(wv)
 
         saving = true
         try {
