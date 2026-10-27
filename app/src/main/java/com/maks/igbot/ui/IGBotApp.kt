@@ -20,11 +20,15 @@ import androidx.core.content.ContextCompat
 import com.maks.igbot.BotForegroundService
 import com.maks.igbot.data.BotEngine
 import com.maks.igbot.ui.accounts.AccountsScreen
+import com.maks.igbot.ui.components.StatusPill
 import com.maks.igbot.ui.dashboard.DashboardScreen
 import com.maks.igbot.ui.logs.EventLogScreen
 import com.maks.igbot.ui.limits.LimitsScreen
 import com.maks.igbot.ui.scraper.ScraperScreen
 import com.maks.igbot.ui.theme.AppBackground
+import com.maks.igbot.ui.theme.AppInfo
+import com.maks.igbot.ui.theme.AppSuccess
+import com.maks.igbot.ui.theme.AppTextMuted
 import com.maks.igbot.ui.theme.BrandAccent
 import com.maks.igbot.ui.theme.BrandPrimaryDark
 import kotlinx.coroutines.Dispatchers
@@ -59,7 +63,8 @@ fun IGBotMainApp() {
     var storiesHr by remember { mutableIntStateOf(0) }
     var storiesHrMax by remember { mutableIntStateOf(50) }
 
-    var logs by remember { mutableStateOf(listOf<String>()) }
+    var lastEvent by remember { mutableStateOf("") }
+    var logs by remember { mutableStateOf(listOf<String>()) }  // від нових до старих; оновлюється лише на вкладці «Події»
 
     // Фонове опитування Python-ядра кожні 2 секунди
     LaunchedEffect(Unit) {
@@ -88,14 +93,19 @@ fun IGBotMainApp() {
                 storiesHr = dash.optInt("stories_hr", 0)
                 storiesHrMax = dash.optInt("stories_hr_max", 50)
 
-                val arr = dash.optJSONArray("logs")
-                if (arr != null) {
-                    val list = mutableListOf<String>()
-                    for (i in 0 until arr.length()) {
-                        list.add(arr.getString(i))
-                    }
-                    logs = list.reversed()
-                }
+                lastEvent = dash.optString("last_event", "")
+            } catch (_: Exception) {
+            }
+            delay(2000)
+        }
+    }
+
+    // Журнал підвантажуємо лише поки відкрита вкладка «Події» — без зайвого трафіку до Python
+    LaunchedEffect(selectedTab) {
+        if (selectedTab != 2) return@LaunchedEffect
+        while (true) {
+            try {
+                logs = withContext(Dispatchers.IO) { BotEngine.getLogs(context, 300) }.reversed()
             } catch (_: Exception) {
             }
             delay(2000)
@@ -126,6 +136,16 @@ fun IGBotMainApp() {
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
+                },
+                actions = {
+                    // Загальний індикатор стану видно на будь-якій вкладці
+                    val (pillText, pillColor) = when {
+                        workerRunning -> "Працює" to AppSuccess
+                        scraperRunning -> "Збір бази" to AppInfo
+                        else -> "Очікує" to AppTextMuted
+                    }
+                    StatusPill(pillText, pillColor, pulsing = workerRunning || scraperRunning)
+                    Spacer(Modifier.width(12.dp))
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = AppBackground,
@@ -203,6 +223,13 @@ fun IGBotMainApp() {
                     storiesDayMax = storiesDayMax,
                     storiesHr = storiesHr,
                     storiesHrMax = storiesHrMax,
+                    lastEvent = lastEvent,
+                    onClearCounter = { kind ->
+                        scope.launch {
+                            val cleared = withContext(Dispatchers.IO) { BotEngine.clearCounter(context, kind) }
+                            Toast.makeText(context, "Очищено: $cleared", Toast.LENGTH_SHORT).show()
+                        }
+                    },
                     onUnlock = {
                         scope.launch(Dispatchers.IO) {
                             BotEngine.unlockAll(context)
@@ -215,7 +242,15 @@ fun IGBotMainApp() {
                     scraperRunning = scraperRunning,
                     scraperTask = scraperTask
                 )
-                2 -> EventLogScreen(logs = logs)
+                2 -> EventLogScreen(
+                    logs = logs,
+                    onClear = {
+                        scope.launch {
+                            withContext(Dispatchers.IO) { BotEngine.clearLogs(context) }
+                            logs = emptyList()
+                        }
+                    }
+                )
                 3 -> LimitsScreen(context = context)
                 4 -> AccountsScreen(context = context)
             }

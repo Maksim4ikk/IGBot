@@ -2,22 +2,37 @@ package com.maks.igbot.ui.limits
 
 import android.content.Context
 import android.widget.Toast
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Save
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
+import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.maks.igbot.data.BotEngine
+import com.maks.igbot.ui.components.AppCard
+import com.maks.igbot.ui.components.InfoNote
+import com.maks.igbot.ui.components.NumField
 import com.maks.igbot.ui.components.ScreenHeader
+import com.maks.igbot.ui.components.SectionTitle
+import com.maks.igbot.ui.components.SettingSwitch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -29,7 +44,7 @@ import kotlinx.coroutines.withContext
 fun LimitsScreen(context: Context) {
     val scope = rememberCoroutineScope()
     var likeLastPost by remember { mutableStateOf(true) }
-    var watchStories by remember { mutableStateOf(true) }
+    var watchStories by remember { mutableStateOf(false) }
     var skipBusiness by remember { mutableStateOf(true) }
 
     var likesPerHour by remember { mutableStateOf("18") }
@@ -50,7 +65,7 @@ fun LimitsScreen(context: Context) {
     LaunchedEffect(Unit) {
         val cfg = withContext(Dispatchers.IO) { BotEngine.getSettingsJson(context) }
         likeLastPost = cfg.optBoolean("like_last_post", true)
-        watchStories = cfg.optBoolean("watch_stories", true)
+        watchStories = cfg.optBoolean("watch_stories", false)
         skipBusiness = cfg.optBoolean("skip_business", true)
         likesPerHour = cfg.optInt("likes_per_hour", 18).toString()
         likesPerDay = cfg.optInt("likes_per_day", 120).toString()
@@ -68,159 +83,68 @@ fun LimitsScreen(context: Context) {
     }
 
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState()),
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        ScreenHeader("Ліміти та режим", "Налаштуйте дії, частоту й активний час")
+        ScreenHeader("Ліміти та режим", "Що робить бот, як часто і коли")
 
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("❤️ Ставити лайк на останній пост")
-            Switch(checked = likeLastPost, onCheckedChange = { likeLastPost = it })
-        }
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("👁 Переглядати сторіс користувача")
-            Switch(checked = watchStories, onCheckedChange = { watchStories = it })
-        }
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text("🏪 Пропускати бізнес-акаунти")
-            Switch(checked = skipBusiness, onCheckedChange = { skipBusiness = it })
-        }
-
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            OutlinedTextField(
-                value = likesPerHour,
-                onValueChange = { likesPerHour = it.filter { c -> c.isDigit() } },
-                label = { Text("Лайків / год") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.weight(1f)
+        AppCard {
+            SectionTitle("Дії бота", "🎛️")
+            SettingSwitch(
+                title = "Лайкати останній пост",
+                subtitle = "Відкриває пост і ставить «подобається»",
+                checked = likeLastPost, onChange = { likeLastPost = it }, emoji = "❤️"
             )
-            OutlinedTextField(
-                value = likesPerDay,
-                onValueChange = { likesPerDay = it.filter { c -> c.isDigit() } },
-                label = { Text("Лайків / день") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.weight(1f)
+            SettingSwitch(
+                title = "Переглядати сторіс",
+                subtitle = "Ненадійно: Instagram часто блокує цей запит",
+                checked = watchStories, onChange = { watchStories = it }, emoji = "👁"
+            )
+            SettingSwitch(
+                title = "Пропускати бізнес-акаунти",
+                subtitle = "Магазини та сторінки компаній відсіюються",
+                checked = skipBusiness, onChange = { skipBusiness = it }, emoji = "🏪"
             )
         }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            OutlinedTextField(
-                value = storiesPerHour,
-                onValueChange = { storiesPerHour = it.filter { c -> c.isDigit() } },
-                label = { Text("Сторіс / год") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.weight(1f)
-            )
-            OutlinedTextField(
-                value = storiesPerDay,
-                onValueChange = { storiesPerDay = it.filter { c -> c.isDigit() } },
-                label = { Text("Сторіс / день") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.weight(1f)
-            )
+        AppCard {
+            SectionTitle("Частота дій", "⏱️")
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                NumField(likesPerHour, { likesPerHour = it }, "Лайків / год", Modifier.weight(1f))
+                NumField(likesPerDay, { likesPerDay = it }, "Лайків / день", Modifier.weight(1f))
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                NumField(storiesPerHour, { storiesPerHour = it }, "Сторіс / год", Modifier.weight(1f))
+                NumField(storiesPerDay, { storiesPerDay = it }, "Сторіс / день", Modifier.weight(1f))
+            }
+            InfoNote("Перші дні ліміти автоматично менші (прогрів нового акаунта).")
         }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            OutlinedTextField(
-                value = startHour,
-                onValueChange = { startHour = it.filter { c -> c.isDigit() } },
-                label = { Text("Старт з (год, 0-23)") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.weight(1f)
-            )
-            OutlinedTextField(
-                value = endHour,
-                onValueChange = { endHour = it.filter { c -> c.isDigit() } },
-                label = { Text("Сон з (год, 1-24)") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.weight(1f)
-            )
+        AppCard {
+            SectionTitle("Робочі години", "🌙")
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                NumField(startHour, { startHour = it }, "Старт з (0–23)", Modifier.weight(1f))
+                NumField(endHour, { endHour = it }, "Сон з (1–24)", Modifier.weight(1f))
+            }
         }
 
-        HorizontalDivider()
-        Text("🔎 Парсер аудиторії", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-
-        OutlinedTextField(
-            value = scrapeAmount,
-            onValueChange = { scrapeAmount = it.filter { c -> c.isDigit() } },
-            label = { Text("Скільки анкет збирати за один запуск") },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true
-        )
-
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            OutlinedTextField(
-                value = scrapeDelayMin,
-                onValueChange = { scrapeDelayMin = it.filter { c -> c.isDigit() || c == '.' || c == ',' } },
-                label = { Text("Пауза між анкетами від (с)") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                modifier = Modifier.weight(1f)
-            )
-            OutlinedTextField(
-                value = scrapeDelayMax,
-                onValueChange = { scrapeDelayMax = it.filter { c -> c.isDigit() || c == '.' || c == ',' } },
-                label = { Text("до (с)") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                modifier = Modifier.weight(1f)
-            )
+        AppCard {
+            SectionTitle("Парсер аудиторії", "🔎")
+            NumField(scrapeAmount, { scrapeAmount = it }, "Скільки анкет збирати за запуск", Modifier.fillMaxWidth())
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                NumField(scrapeDelayMin, { scrapeDelayMin = it }, "Пауза від (с)", Modifier.weight(1f), decimal = true)
+                NumField(scrapeDelayMax, { scrapeDelayMax = it }, "до (с)", Modifier.weight(1f), decimal = true)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                NumField(breakEveryMin, { breakEveryMin = it }, "Перерва кожні, анкет", Modifier.weight(1f))
+                NumField(breakEveryMax, { breakEveryMax = it }, "до (анкет)", Modifier.weight(1f))
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                NumField(breakMinutesMin, { breakMinutesMin = it }, "Перерва від (хв)", Modifier.weight(1f), decimal = true)
+                NumField(breakMinutesMax, { breakMinutesMax = it }, "до (хв)", Modifier.weight(1f), decimal = true)
+            }
+            InfoNote("Повільніший збір безпечніший для технічного акаунта. Зміни діють з наступного запуску парсера.")
         }
-
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            OutlinedTextField(
-                value = breakEveryMin,
-                onValueChange = { breakEveryMin = it.filter { c -> c.isDigit() } },
-                label = { Text("Перерва кожні від (анкет)") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.weight(1f)
-            )
-            OutlinedTextField(
-                value = breakEveryMax,
-                onValueChange = { breakEveryMax = it.filter { c -> c.isDigit() } },
-                label = { Text("до (анкет)") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.weight(1f)
-            )
-        }
-
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            OutlinedTextField(
-                value = breakMinutesMin,
-                onValueChange = { breakMinutesMin = it.filter { c -> c.isDigit() || c == '.' || c == ',' } },
-                label = { Text("Тривалість перерви від (хв)") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                modifier = Modifier.weight(1f)
-            )
-            OutlinedTextField(
-                value = breakMinutesMax,
-                onValueChange = { breakMinutesMax = it.filter { c -> c.isDigit() || c == '.' || c == ',' } },
-                label = { Text("до (хв)") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                modifier = Modifier.weight(1f)
-            )
-        }
-
-        Text(
-            "Повільніший збір безпечніший для технічного акаунта. Зміни діють з наступного запуску парсера.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
 
         Button(
             onClick = {
@@ -251,9 +175,9 @@ fun LimitsScreen(context: Context) {
                     cfg.put("scrape_break_minutes_max", mMax)
                     BotEngine.saveSettingsJson(context, cfg)
                 }
-                Toast.makeText(context, "Ліміти збережено!", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Налаштування збережено!", Toast.LENGTH_SHORT).show()
             },
-            modifier = Modifier.fillMaxWidth().height(50.dp)
+            modifier = Modifier.fillMaxWidth().height(52.dp)
         ) {
             Icon(Icons.Default.Save, contentDescription = null)
             Spacer(Modifier.width(8.dp))

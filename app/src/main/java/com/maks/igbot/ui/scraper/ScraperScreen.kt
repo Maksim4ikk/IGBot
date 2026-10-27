@@ -5,24 +5,41 @@ import android.content.Intent
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.maks.igbot.BotForegroundService
 import com.maks.igbot.data.BotEngine
+import com.maks.igbot.ui.components.AppCard
+import com.maks.igbot.ui.components.InfoNote
 import com.maks.igbot.ui.components.ScreenHeader
+import com.maks.igbot.ui.components.SectionTitle
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -35,11 +52,18 @@ import kotlinx.coroutines.withContext
 fun ScraperScreen(context: Context, scraperRunning: Boolean, scraperTask: String) {
     var sourceType by remember { mutableStateOf("followers") }
     var targetInput by remember { mutableStateOf("") }
-    var amountInput by remember { mutableStateOf("50") }
+    var settingsHint by remember { mutableStateOf("") }
+
+    // Кількість анкет і паузи задаються у вкладці «Ліміти» — тут лише показуємо поточні значення
     LaunchedEffect(Unit) {
         val cfg = withContext(Dispatchers.IO) { BotEngine.getSettingsJson(context) }
-        amountInput = cfg.optInt("scrape_amount", 50).toString()
+        val amount = cfg.optInt("scrape_amount", 50)
+        val dMin = cfg.optDouble("scrape_delay_min", 8.0)
+        val dMax = cfg.optDouble("scrape_delay_max", 15.0)
+        settingsHint = "Збір за запуск: $amount · пауза між анкетами ${dMin.toInt()}–${dMax.toInt()} с. " +
+            "Змінити можна у вкладці «Ліміти»."
     }
+
     val importScope = rememberCoroutineScope()
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
@@ -64,114 +88,107 @@ fun ScraperScreen(context: Context, scraperRunning: Boolean, scraperTask: String
     }
 
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         ScreenHeader("Збір аудиторії", "Знайдіть і відфільтруйте потенційних клієнтів")
-        Text(
-            "Оберіть джерело, задайте ціль і кількість профілів для перевірки.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
 
-        // Вибір типу джерела
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(
-                selected = sourceType == "followers",
-                onClick = { sourceType = "followers" },
-                label = { Text("Підписники") }
-            )
-            FilterChip(
-                selected = sourceType == "likers",
-                onClick = { sourceType = "likers" },
-                label = { Text("Лайкери поста") }
-            )
-            FilterChip(
-                selected = sourceType == "hashtag",
-                onClick = { sourceType = "hashtag" },
-                label = { Text("Хештег") }
-            )
-        }
+        AppCard {
+            SectionTitle("Нове завдання", "🔎")
 
-        OutlinedTextField(
-            value = targetInput,
-            onValueChange = { targetInput = it },
-            label = {
-                Text(
-                    when (sourceType) {
-                        "followers" -> "Нікнейм донора (наприклад: kyiv_coffee)"
-                        "likers" -> "Посилання на пост (https://www.instagram.com/p/...)"
-                        else -> "Хештег без # (наприклад: київкава)"
-                    }
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected = sourceType == "followers",
+                    onClick = { sourceType = "followers" },
+                    label = { Text("Підписники") }
                 )
-            },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true
-        )
-
-        OutlinedTextField(
-            value = amountInput,
-            onValueChange = { amountInput = it.filter { ch -> ch.isDigit() } },
-            label = {
-                Text(
-                    if (sourceType == "hashtag") "Скільки постів переглянути (за замовчуванням — з «Ліміти»)"
-                    else "Скільки анкет зібрати (за замовчуванням — з «Ліміти»)"
+                FilterChip(
+                    selected = sourceType == "likers",
+                    onClick = { sourceType = "likers" },
+                    label = { Text("Лайкери поста") }
                 )
-            },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true
-        )
+                FilterChip(
+                    selected = sourceType == "hashtag",
+                    onClick = { sourceType = "hashtag" },
+                    label = { Text("Хештег") }
+                )
+            }
 
-        Button(
-            onClick = {
-                if (targetInput.isBlank()) {
-                    Toast.makeText(context, "Введіть ціль для парсингу!", Toast.LENGTH_SHORT).show()
-                    return@Button
-                }
-                val amt = amountInput.toIntOrNull() ?: 50
-                val intent = Intent(context, BotForegroundService::class.java).apply {
-                    action = "START_SCRAPER"
-                    putExtra("source_type", sourceType)
-                    putExtra("target", targetInput.trim())
-                    putExtra("amount", amt)
-                }
-                ContextCompat.startForegroundService(context, intent)
-                Toast.makeText(context, "Парсер запущено! Дивіться прогрес на Дашборді.", Toast.LENGTH_SHORT).show()
-            },
-            enabled = !scraperRunning,
-            modifier = Modifier.fillMaxWidth().height(50.dp)
-        ) {
-            Icon(Icons.Default.Search, contentDescription = null)
-            Spacer(Modifier.width(8.dp))
-            Text(if (scraperRunning) "Парсер вже працює ($scraperTask)" else "Запустити збір бази")
-        }
-
-        if (scraperRunning) {
-            OutlinedButton(
-                onClick = {
-                    CoroutineScope(Dispatchers.IO).launch { BotEngine.stopScraper(context) }
+            Text(
+                when (sourceType) {
+                    "followers" -> "Бере підписників акаунта-донора, відсіює приватні та магазини, знаходить свіжий пост."
+                    "likers" -> "Бере людей, які лайкнули пост, відсіює приватні та магазини, знаходить свіжий пост."
+                    else -> "Відкриває сторінку хештегу, дізнається авторів постів і лайкатиме саме ці пости."
                 },
-                modifier = Modifier.fillMaxWidth()
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            OutlinedTextField(
+                value = targetInput,
+                onValueChange = { targetInput = it },
+                label = {
+                    Text(
+                        when (sourceType) {
+                            "followers" -> "Нікнейм донора (наприклад: kyiv_coffee)"
+                            "likers" -> "Посилання на пост (https://www.instagram.com/p/...)"
+                            else -> "Хештег без # (наприклад: київкава)"
+                        }
+                    )
+                },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+
+            if (settingsHint.isNotEmpty()) InfoNote(settingsHint, emoji = "⚙️")
+
+            Button(
+                onClick = {
+                    if (targetInput.isBlank()) {
+                        Toast.makeText(context, "Введіть ціль для парсингу!", Toast.LENGTH_SHORT).show()
+                        return@Button
+                    }
+                    // amount не передаємо: Python бере кількість із налаштувань («Ліміти»)
+                    val intent = Intent(context, BotForegroundService::class.java).apply {
+                        action = "START_SCRAPER"
+                        putExtra("source_type", sourceType)
+                        putExtra("target", targetInput.trim())
+                    }
+                    ContextCompat.startForegroundService(context, intent)
+                    Toast.makeText(context, "Парсер запущено! Прогрес — на вкладках «Огляд» і «Події».", Toast.LENGTH_SHORT).show()
+                },
+                enabled = !scraperRunning,
+                modifier = Modifier.fillMaxWidth().height(52.dp)
             ) {
-                Text("Зупинити поточний парсинг", color = MaterialTheme.colorScheme.error)
+                Icon(Icons.Default.Search, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text(if (scraperRunning) "Парсер вже працює ($scraperTask)" else "Запустити збір бази")
+            }
+
+            if (scraperRunning) {
+                OutlinedButton(
+                    onClick = { CoroutineScope(Dispatchers.IO).launch { BotEngine.stopScraper(context) } },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Зупинити поточний парсинг", color = MaterialTheme.colorScheme.error)
+                }
             }
         }
 
-        HorizontalDivider()
-        Text(
-            "Або завантажте готову чергу, зібрану на ПК (файл targets.json):",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        OutlinedButton(
-            onClick = { importLauncher.launch(arrayOf("*/*")) },
-            modifier = Modifier.fillMaxWidth().height(50.dp)
-        ) {
-            Text("Імпортувати чергу з JSON")
+        AppCard {
+            SectionTitle("Імпорт черги з файлу", "📂")
+            Text(
+                "Якщо ви зібрали чергу на комп'ютері (команда export), завантажте файл targets.json.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            OutlinedButton(
+                onClick = { importLauncher.launch(arrayOf("*/*")) },
+                modifier = Modifier.fillMaxWidth().height(50.dp)
+            ) {
+                Text("Імпортувати чергу з JSON")
+            }
         }
+        Spacer(Modifier.height(12.dp))
     }
 }
-

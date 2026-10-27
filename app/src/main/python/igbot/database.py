@@ -91,6 +91,41 @@ class Database:
     def stats(self) -> dict:
         return dict(self.conn.execute("SELECT status, COUNT(*) FROM targets GROUP BY status").fetchall())
 
+    # ── лічильники на дашборді ─────────────────────────────────────
+    def _reset_ts(self, kind: str) -> float:
+        try:
+            return float(self.get_meta(f"counter_reset:{kind}") or "0")
+        except (TypeError, ValueError):
+            return 0.0
+
+    def dashboard_counts(self) -> dict:
+        """Числа для плиток «Огляду». «Оброблено» і «Відсіяно» рахуються від моменту останнього
+        скидання (сама історія лишається в БД — вона захищає від повторних лайків)."""
+        def one(sql: str, *args) -> int:
+            return self.conn.execute(sql, args).fetchone()[0]
+        return {
+            "ready": one("SELECT COUNT(*) FROM targets WHERE status='ready'"),
+            "interacted": one("SELECT COUNT(*) FROM targets WHERE status='interacted' AND updated_at >= ?",
+                              self._reset_ts("interacted")),
+            "skipped": one("SELECT COUNT(*) FROM targets WHERE status LIKE 'skipped%' AND updated_at >= ?",
+                           self._reset_ts("skipped")),
+            "errors": one("SELECT COUNT(*) FROM targets WHERE status IN ('error','gone')"),
+        }
+
+    def clear_counter(self, kind: str) -> int:
+        """Очищення плитки. ready/errors — записи видаляються. interacted/skipped — лічильник
+        скидається, а записи лишаються, щоб бот не лайкав і не перевіряв тих самих людей повторно.
+        Повертає, скільки було очищено."""
+        if kind == "ready":
+            return self.conn.execute("DELETE FROM targets WHERE status='ready'").rowcount
+        if kind == "errors":
+            return self.conn.execute("DELETE FROM targets WHERE status IN ('error','gone')").rowcount
+        if kind in ("interacted", "skipped"):
+            n = self.dashboard_counts()[kind]
+            self.set_meta(f"counter_reset:{kind}", str(time.time()))
+            return n
+        raise ValueError(f"Невідомий лічильник: {kind}")
+
     def log_action(self, account: str, kind: str, count: int = 1) -> None:
         self.conn.execute("INSERT INTO action_log(account, kind, ts, count) VALUES (?,?,?,?)",
                           (account, kind, time.time(), count))

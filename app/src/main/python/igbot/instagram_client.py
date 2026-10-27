@@ -1,34 +1,21 @@
+"""HTTP-клієнт Instagram Web (requests). Лише те, що працює на практиці:
+сесія/куки, список лайкерів, підписники, перегляд сторіс.
+
+Усе, що Instagram блокує для запитів з Python (профілі, стрічки, лайк, хештеги),
+робиться через WebView — див. webbridge.py.
+"""
 from __future__ import annotations
 import json, random, re, string, time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote, unquote
 import requests
 from .errors import (
     ApiError, ChallengeRequired, FeedbackRequired, LoginRequired,
-    MediaNotFound, PleaseWaitFewMinutes, StopWork, UserNotFound,
+    PleaseWaitFewMinutes, StopWork, UserNotFound,
 )
-from .models import MediaItem, StoryItem, UserInfo, UserShort
+from .models import StoryItem, UserInfo, UserShort
 from .state import log
-
-
-def _edge_count(obj) -> int:
-    """Повертає count з {"count": N}; -1 якщо поля немає (= невідомо, а не 0)."""
-    if isinstance(obj, dict) and obj.get("count") is not None:
-        try:
-            return int(obj["count"])
-        except (TypeError, ValueError):
-            return -1
-    return -1
-
-
-def _to_int(v) -> int:
-    """None / сміття -> -1 (невідомо)."""
-    try:
-        return int(v) if v is not None else -1
-    except (TypeError, ValueError):
-        return -1
 
 
 class WebInstaClient:
@@ -48,8 +35,6 @@ class WebInstaClient:
     def __init__(self, user_agent: str = "", accept_language: str = ""):
         self.session = requests.Session()
         self.delay_range = [2.5, 5.0]
-        self._feed_cache: dict[int, list[MediaItem]] = {}
-        self._web_info_cooldown_until = 0.0
         self.session.headers.update({
             "User-Agent": (user_agent or "").strip() or self.WEB_UA,
             "X-IG-App-ID": self.APP_ID,
@@ -62,7 +47,6 @@ class WebInstaClient:
             "Referer": self.BASE + "/",
         })
 
-    # ── службові ────────────────────────────────────────────────────
     def set_proxy(self, proxy_url: str) -> None:
         if proxy_url:
             self.session.proxies = {"http": proxy_url, "https": proxy_url}
@@ -199,6 +183,7 @@ class WebInstaClient:
         return data
 
     # ── вхід ────────────────────────────────────────────────────────
+
     def login_by_sessionid(self, sessionid: str) -> None:
         clean_sid = unquote(sessionid.strip())
         if not clean_sid:
@@ -244,284 +229,26 @@ class WebInstaClient:
             raise LoginRequired(f"Сесія невалідна: {str(data)[:150]}")
         return data
 
-    # ── допоміжні методи для постів та профілів ─────────────────────
-    @staticmethod
-    def shortcode_to_pk(code: str) -> int:
-        alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-        pk = 0
-        for ch in code:
-            pk = pk * 64 + alphabet.index(ch)
-        return pk
+    # ── дані ────────────────────────────────────────────────────────
 
-    @staticmethod
-    def pk_to_shortcode(pk: int) -> str:
-        alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-        pk = int(pk)
-        if pk <= 0:
-            raise ValueError("pk має бути додатним")
-        out = ""
-        while pk:
-            pk, r = divmod(pk, 64)
-            out = alphabet[r] + out
-        return out
-
-    @classmethod
-    def media_pk_from_url(cls, url: str) -> int:
-        m = re.search(r"/(?:p|reel|tv)/([A-Za-z0-9_-]+)", url)
-        if not m:
-            raise ValueError("Невірне посилання на пост")
-        return cls.shortcode_to_pk(m.group(1))
-
-    def _fetch_embed_profile(self, uid: int, username: str, full_name: str = "", amount: int = 4) -> Optional[tuple[UserInfo, list[MediaItem]]]:
-        """Публічне отримання профілю та постів через /{username}/embed/ (БЕЗ куків і X-IG-App-ID — 0 лімітів 429)."""
-        uname = (username or "").strip().lstrip("@")
-        if not uname or uname.startswith("id"):
-            return None
-
-        lo, hi = self.delay_range
-        time.sleep(random.uniform(min(1.5, lo), min(3.5, hi)))
-
-        try:
-            resp = requests.get(
-                f"{self.BASE}/{quote(uname)}/embed/",
-                headers={
-                    "User-Agent": self.DESKTOP_UA,
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "en-US,en;q=0.9",
-                },
-                proxies=self.session.proxies or None,
-                timeout=20,
-            )
-        except requests.RequestException:
-            return None
-
-        if resp.status_code == 404:
-            raise UserNotFound(f"404 Not Found (@{uname})")
-        if resp.status_code != 200 or not resp.text:
-            return None
-
-        html = resp.text
-        if "Page Not Found" in html or "Sorry, this page isn't available" in html:
-            raise UserNotFound(f"Профіль @{uname} недоступний")
-
-        is_private = "This Account is Private" in html or '"is_private":true' in html
-        follower_count = -1
-        captions: list[str] = []
-        items: list[MediaItem] = []
-
-        # Витягуємо дані з contextJSON, якщо він присутній в embed
-        m_ctx = re.search(r'contextJSON"\s*,\s*"((?:\\.|[^"\\])*)"', html)
-        if m_ctx:
-            try:
-                raw_json = json.loads(f'"{m_ctx.group(1)}"')
-                ctx = json.loads(raw_json)
-                owner = (ctx.get("context") or {}).get("graphql_media") or ctx.get("owner") or {}
-            except Exception:
-                owner = {}
-
-        # Витягуємо всі shortcode постів зі сторінки embed
-        codes: list[str] = []
-        for m in re.finditer(r'\\?"shortcode\\?"\s*:\s*\\?"([A-Za-z0-9_-]{8,15})\\?"', html):
-            c = m.group(1)
-            if c not in codes:
-                codes.append(c)
-        if not codes:
-            for m in re.finditer(r"/(?:p|reel)/([A-Za-z0-9_-]{8,15})/", html):
-                c = m.group(1)
-                if c not in codes:
-                    codes.append(c)
-
-        if not codes:
-            log.warning("[IG] embed @%s: HTTP 200, %d байт, shortcode не знайдено", uname, len(html))
-
-        now_dt = datetime.now(tz=timezone.utc)
-        for code in codes[:amount]:
-            try:
-                pk = self.shortcode_to_pk(code)
-                items.append(MediaItem(
-                    id=str(pk),
-                    pk=pk,
-                    code=code,
-                    taken_at=now_dt,
-                ))
-            except ValueError:
-                continue
-
-        # ВИПРАВЛЕНО: якщо embed не віддав жодного shortcode — кількість постів НЕВІДОМА (-1),
-        # а не 0. Інакше всі анкети отримують skipped_numbers.
-        media_count = len(codes) if codes else -1
-        info = UserInfo(
-            pk=int(uid),
-            username=uname,
-            full_name=full_name or "",
-            biography=" ".join(captions)[:500],
-            is_private=is_private,
-            is_business=False,
-            category="",
-            media_count=media_count,
-            follower_count=follower_count,
-            following_count=-1,
-        )
-        return info, items
-
-    # ── пошук / дані ────────────────────────────────────────────────
-    def user_id_from_username(self, username: str) -> int:
-        uname = username.strip().lstrip("@").lower()
-        if not uname:
-            raise UserNotFound("Вкажіть нікнейм профілю для пошуку")
-
-        data = self._req(
-            "GET",
-            f"{self.API}/web/search/topsearch/?context=user&include_reel=false&query={quote(uname)}",
-            context="пошук профілю",
-        )
-        for row in data.get("users") or []:
-            user = row.get("user") or row
-            found_name = str(user.get("username", "")).strip().lower()
-            user_id = user.get("pk") or user.get("id")
-            if found_name == uname and user_id:
-                return int(user_id)
-
-        raise UserNotFound(
-            f"Instagram не повернув точний збіг для @{uname} у пошуку. "
-            "Перевірте нікнейм і спробуйте пізніше."
-        )
-
-    def user_info(self, uid: int, username: str = "", full_name: str = "") -> UserInfo:
-        uname = (username or "").strip().lstrip("@")
-
-        # 1. Якщо відомий username — використовуємо веб-ендпоінт web_profile_info (повертає і анкету, і пости за 1 запит)
-        if uname and not uname.startswith("id") and time.time() >= self._web_info_cooldown_until:
-            try:
-                data = self._req(
-                    "GET",
-                    f"{self.API}/users/web_profile_info/?username={quote(uname)}",
-                    headers={"Referer": f"{self.BASE}/{uname}/"},
-                    context="веб-профіль",
-                    quiet_html=True,
-                )
-                u = (data.get("data") or {}).get("user")
-                if not u:
-                    log.warning("[IG] web_profile_info @%s: немає user у відповіді: %s", uname, str(data)[:200])
-                if u:
-                    media_edge = u.get("edge_owner_to_timeline_media") or {}
-                    edges = media_edge.get("edges") or []
-                    items: list[MediaItem] = []
-                    for edge in edges[:6]:
-                        node = edge.get("node") or {}
-                        if not node.get("id"):
-                            continue
-                        ts = int(node.get("taken_at_timestamp", time.time()))
-                        items.append(MediaItem(
-                            id=str(node["id"]),
-                            pk=int(node["id"]),
-                            code=str(node.get("shortcode", "")),
-                            taken_at=datetime.fromtimestamp(ts, tz=timezone.utc),
-                        ))
-
-                    # ВИПРАВЛЕНО: порожній список постів не кешуємо
-                    if items:
-                        self._feed_cache[int(uid)] = items
-
-                    # ВИПРАВЛЕНО: відсутнє поле = -1 (невідомо), а не 0
-                    media_count = _edge_count(media_edge)
-                    if media_count < 0 and items:
-                        media_count = len(items)
-
-                    return UserInfo(
-                        pk=int(u.get("id") or uid),
-                        username=u.get("username") or uname,
-                        full_name=u.get("full_name") or full_name or "",
-                        biography=u.get("biography") or "",
-                        is_private=bool(u.get("is_private", False)),
-                        is_business=bool(u.get("is_business_account") or u.get("is_professional_account")),
-                        category=u.get("category_name") or "",
-                        media_count=media_count,
-                        follower_count=_edge_count(u.get("edge_followed_by")),
-                        following_count=_edge_count(u.get("edge_follow")),
-                    )
-            except (PleaseWaitFewMinutes, FeedbackRequired):
-                raise  # акаунт під лімітом/блоком — іншими ендпоінтами не довбемо
-            except ApiError as e:
-                self._web_info_cooldown_until = time.time() + 900
-                log.warning("[IG] web_profile_info @%s не вдалося: %s (кулдаун 15 хв)", uname, e)
-
-        embed_info: Optional[UserInfo] = None
-
-        # 2. Якщо web_profile_info на кулдауні — беремо через публічний embed
-        if uname and not uname.startswith("id"):
-            res = self._fetch_embed_profile(uid, uname, full_name=full_name, amount=6)
-            if res is not None:
-                embed_info, items = res
-                # порожній список не кешуємо, щоб user_medias() спробував резервні ендпоінти
-                if items:
-                    self._feed_cache[int(uid)] = items
-                # embed дав щось певне (приватний акаунт або відома кількість постів)
-                if embed_info.is_private or embed_info.media_count >= 0:
-                    return embed_info
-
-        # 3. Авторизований /users/{uid}/info/ — коли попередні джерела нічого не дали
-        #    (або username невідомий, наприклад при реєстрації акаунта)
-        try:
-            data = self._req("GET", f"{self.API}/users/{uid}/info/", context="завантаження профілю", quiet_html=True)
-        except ApiError as e:
-            log.warning("[IG] users/%s/info не вдалося: %s", uid, e)
-            if embed_info is not None:
-                return embed_info
-            raise
+    def user_info(self, uid: int) -> UserInfo:
+        """Профіль за числовим ID (авторизований ендпоінт; Instagram часто віддає на нього 429)."""
+        data = self._req("GET", f"{self.API}/users/{uid}/info/", context="завантаження профілю", quiet_html=True)
         u = data.get("user")
         if not u:
             raise ApiError(f"user_info без user для ID {uid}: {str(data)[:200]}")
         return UserInfo(
             pk=int(u["pk"]),
-            username=u.get("username", "") or uname,
-            full_name=u.get("full_name", "") or full_name or "",
+            username=u.get("username", ""),
+            full_name=u.get("full_name", "") or "",
             biography=u.get("biography", "") or "",
             is_private=bool(u.get("is_private", False)),
             is_business=bool(u.get("is_business", False)),
             category=u.get("category", "") or "",
-            media_count=_to_int(u.get("media_count")),
-            follower_count=_to_int(u.get("follower_count")),
-            following_count=_to_int(u.get("following_count")),
+            media_count=int(u.get("media_count", -1) if u.get("media_count") is not None else -1),
+            follower_count=int(u.get("follower_count", -1) if u.get("follower_count") is not None else -1),
+            following_count=int(u.get("following_count", -1) if u.get("following_count") is not None else -1),
         )
-
-    def user_medias(self, uid: int, amount: int = 4, username: str = "") -> list[MediaItem]:
-        # 1. Якщо пости вже були завантажені під час user_info() — миттєво повертаємо з кешу (0 запитів до IG)
-        if int(uid) in self._feed_cache:
-            cached = self._feed_cache.pop(int(uid))
-            if cached:
-                return cached[:amount]
-
-        uname = (username or "").strip().lstrip("@")
-        known_name = bool(uname) and not uname.startswith("id")
-
-        if known_name:
-            # 3. Веб-ендпоінт за username. Успішна порожня відповідь = постів справді немає
-            try:
-                return self._feed_items(f"{self.API}/feed/user/{quote(uname)}/username/?count={amount}", amount)
-            except ApiError as e:
-                log.warning("[IG] feed/user/%s/username не вдалося: %s", uname, e)
-
-        # 4. Резерв за числовим uid
-        try:
-            return self._feed_items(f"{self.API}/feed/user/{int(uid)}/?count={amount}", amount)
-        except ApiError as e:
-            log.warning("[IG] feed/user/%s не вдалося: %s", uid, e)
-            # НЕ повертаємо [] — інакше анкету помилково запишуть як "без постів"
-            raise ApiError(f"Не вдалося отримати пости @{uname or uid}: {e}")
-
-    def _feed_items(self, url: str, amount: int) -> list[MediaItem]:
-        data = self._req("GET", url, quiet_html=True)
-        items: list[MediaItem] = []
-        for m in (data.get("items") or [])[:amount]:
-            ts = int(m.get("taken_at", time.time()))
-            items.append(MediaItem(
-                id=str(m.get("id", m.get("pk"))),
-                pk=int(m.get("pk", 0)),
-                code=str(m.get("code", "")),
-                taken_at=datetime.fromtimestamp(ts, tz=timezone.utc),
-            ))
-        return items
 
     def user_followers_v1_chunk(self, uid: int, max_amount: int = 100) -> tuple[list[UserShort], str]:
         results: list[UserShort] = []
@@ -559,40 +286,8 @@ class WebInstaClient:
             for u in data.get("users") or []
         ]
 
-    def hashtag_medias_recent(self, tag: str, amount: int = 100) -> list[MediaItem]:
-        data = self._req("GET", f"{self.API}/tags/web_info/?tag_name={quote(tag)}")
-        d = data.get("data") or data
-        sections = list((d.get("recent") or {}).get("sections") or [])
-        sections += list((d.get("top") or {}).get("sections") or [])
-        if not sections:
-            sections = data.get("sections") or []
-        if not sections:
-            log.warning("Хештег #%s: порожні секції. Відповідь: %s", tag, str(data)[:200])
+    # ── сторіс ──────────────────────────────────────────────────────
 
-        items: list[MediaItem] = []
-        for sec in sections:
-            for row in (sec.get("layout_content") or {}).get("medias", []):
-                m = row.get("media")
-                if m and m.get("user"):
-                    u = m["user"]
-                    ts = int(m.get("taken_at", time.time()))
-                    items.append(MediaItem(
-                        id=str(m.get("id", m.get("pk"))),
-                        pk=int(m.get("pk", 0)),
-                        code=str(m.get("code", "")),
-                        taken_at=datetime.fromtimestamp(ts, tz=timezone.utc),
-                        user=UserShort(
-                            pk=int(u["pk"]),
-                            username=u.get("username", ""),
-                            full_name=u.get("full_name", "") or "",
-                            is_private=u.get("is_private"),
-                        ),
-                    ))
-                    if len(items) >= amount:
-                        return items
-        return items
-
-    # ── сторіс / лайки ──────────────────────────────────────────────
     def user_stories(self, uid: int) -> list[StoryItem]:
         try:
             variables = json.dumps(
@@ -668,11 +363,3 @@ class WebInstaClient:
                 quiet_html=True,
             )
         return True
-
-    def media_like(self, media_id: str) -> bool:
-        media_pk = str(media_id).split("_")[0]
-        self._req("POST", f"{self.API}/web/likes/{media_pk}/like/", quiet_html=True)
-        return True
-
-
-MobileInstaClient = WebInstaClient

@@ -21,7 +21,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.maks.igbot.InstagramLoginActivity
 import com.maks.igbot.data.BotEngine
-import com.maks.igbot.data.WebFetcher
 import com.maks.igbot.ui.components.AccountCard
 import com.maks.igbot.ui.components.ScreenHeader
 import kotlinx.coroutines.Dispatchers
@@ -131,15 +130,6 @@ fun AccountsScreen(context: Context) {
             Text("Зберегти проксі")
         }
 
-        OutlinedButton(
-            onClick = {
-                Toast.makeText(context, "Тест мосту запущено (~30 с), дивіться вкладку Події", Toast.LENGTH_LONG).show()
-                WebFetcher.startTest(context)
-            },
-            modifier = Modifier.fillMaxWidth().height(48.dp)
-        ) {
-            Text("Тест мосту (WebView → Instagram)")
-        }
         Spacer(Modifier.height(20.dp))
     }
 }

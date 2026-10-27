@@ -10,7 +10,7 @@ STOP_SCRAPER = threading.Event()
 WORKER_RUNNING = False
 SCRAPER_RUNNING = False
 SCRAPER_TASK = ""
-LOG_BUFFER: deque[str] = deque(maxlen=250)
+LOG_BUFFER: deque[str] = deque(maxlen=500)
 APP_DIR: Path = Path(".")
 
 

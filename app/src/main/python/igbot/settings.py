@@ -42,7 +42,7 @@ class Settings:
     warmup_days: int = 7
     warmup_start_factor: float = 0.3
 
-    watch_stories: bool = True
+    watch_stories: bool = False  # сторіс іде через API, який Instagram блокує — типово вимкнено
     like_last_post: bool = True
     like_probability: float = 1.0
     max_stories_per_user: int = 5
@@ -88,7 +88,24 @@ class Settings:
                         setattr(s, k, v)
             except Exception as e:
                 log.error("Помилка config.json: %s", e)
-        return s
+        return s.sanitize()
+
+    def sanitize(self) -> "Settings":
+        """Виправляє некоректні значення (мін > макс, нуль, сміття), щоб бот не впав посеред роботи."""
+        defaults = Settings()
+        try:
+            self.scrape_amount = max(1, int(self.scrape_amount))
+            self.scrape_delay_min = max(0.5, float(self.scrape_delay_min))
+            self.scrape_delay_max = max(self.scrape_delay_min, float(self.scrape_delay_max))
+            self.scrape_break_every_min = max(1, int(self.scrape_break_every_min))
+            self.scrape_break_every_max = max(self.scrape_break_every_min, int(self.scrape_break_every_max))
+            self.scrape_break_minutes_min = max(0.0, float(self.scrape_break_minutes_min))
+            self.scrape_break_minutes_max = max(self.scrape_break_minutes_min, float(self.scrape_break_minutes_max))
+        except (TypeError, ValueError):
+            for name in ("scrape_amount", "scrape_delay_min", "scrape_delay_max", "scrape_break_every_min",
+                         "scrape_break_every_max", "scrape_break_minutes_min", "scrape_break_minutes_max"):
+                setattr(self, name, getattr(defaults, name))
+        return self
 
     def save(self) -> None:
         p = state.APP_DIR / "config.json"

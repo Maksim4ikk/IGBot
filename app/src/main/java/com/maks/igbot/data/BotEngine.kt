@@ -1,22 +1,28 @@
 package com.maks.igbot.data
 
 import android.content.Context
+import android.util.Log
 import com.chaquo.python.Python
 import com.chaquo.python.android.AndroidPlatform
+import com.maks.igbot.web.WebBridge
+import org.json.JSONArray
 import org.json.JSONObject
 
+/**
+ * Єдиний шлюз між Kotlin-інтерфейсом і Python-ядром (Chaquopy).
+ * Усі виклики блокуючі — викликайте їх з Dispatchers.IO.
+ */
 object BotEngine {
     private var initialized = false
 
     @Synchronized
     fun ensureInit(context: Context) {
-        WebLiker.appContext = context.applicationContext
+        WebBridge.init(context)
         if (!Python.isStarted()) {
             Python.start(AndroidPlatform(context.applicationContext))
         }
         if (!initialized) {
-            val py = Python.getInstance()
-            val mod = py.getModule("igbot_engine")
+            val mod = Python.getInstance().getModule("igbot_engine")
             mod.callAttr("init_android_env", context.filesDir.absolutePath)
             initialized = true
         }
@@ -25,6 +31,7 @@ object BotEngine {
     private fun module(context: Context) =
         ensureInit(context).let { Python.getInstance().getModule("igbot_engine") }
 
+    // ── воркер і парсер ─────────────────────────────────────────────
     fun startWorker(context: Context) {
         module(context).callAttr("start_worker_thread")
     }
@@ -33,7 +40,8 @@ object BotEngine {
         module(context).callAttr("stop_worker_thread")
     }
 
-    fun startScraper(context: Context, sourceType: String, target: String, amount: Int) {
+    /** amount = 0 — кількість береться з налаштувань («Ліміти» → «Парсер аудиторії»). */
+    fun startScraper(context: Context, sourceType: String, target: String, amount: Int = 0) {
         module(context).callAttr("start_scraper_thread", sourceType, target, amount)
     }
 
@@ -41,15 +49,40 @@ object BotEngine {
         module(context).callAttr("stop_scraper_thread")
     }
 
-    fun getDashboardJson(context: Context): JSONObject {
-        val raw = module(context).callAttr("get_dashboard_json").toString()
-        return JSONObject(raw)
+    // ── стан і журнал ───────────────────────────────────────────────
+    fun getDashboardJson(context: Context): JSONObject =
+        JSONObject(module(context).callAttr("get_dashboard_json").toString())
+
+    /** Рядки журналу «ГГ:ХХ:СС|рівень|текст», від старих до нових. */
+    fun getLogs(context: Context, limit: Int = 300): List<String> {
+        val arr = JSONArray(module(context).callAttr("get_logs_json", limit).toString())
+        return List(arr.length()) { arr.getString(it) }
     }
 
-    fun getSettingsJson(context: Context): JSONObject {
-        val raw = module(context).callAttr("get_settings_json").toString()
-        return JSONObject(raw)
+    fun clearLogs(context: Context) {
+        module(context).callAttr("clear_logs")
     }
+
+    fun logExternal(context: Context, msg: String) {
+        try {
+            ensureInit(context)
+            Python.getInstance().getModule("logging")
+                .callAttr("getLogger", "igbot")
+                .callAttr("info", msg)
+        } catch (e: Exception) {
+            Log.e("BotEngine", "logExternal: ", e)
+        }
+    }
+
+    /** Очистити плитку «Огляду»: ready | interacted | skipped | errors. Повертає, скільки очищено. */
+    fun clearCounter(context: Context, kind: String): Int {
+        val raw = module(context).callAttr("clear_counter", kind).toString()
+        return JSONObject(raw).optInt("cleared", 0)
+    }
+
+    // ── налаштування ────────────────────────────────────────────────
+    fun getSettingsJson(context: Context): JSONObject =
+        JSONObject(module(context).callAttr("get_settings_json").toString())
 
     fun saveSettingsJson(context: Context, json: JSONObject) {
         module(context).callAttr("save_settings_json", json.toString())
@@ -59,7 +92,7 @@ object BotEngine {
         module(context).callAttr("unlock_all")
     }
 
-    /** Зберегти акаунт після входу через WebView. kind = "main" | "scraper" */
+    // ── акаунти ─────────────────────────────────────────────────────
     /** Зберегти акаунт після входу через WebView. kind = "main" | "scraper" */
     fun registerAccount(
         context: Context,
@@ -80,13 +113,6 @@ object BotEngine {
     }
 
     /** Імпорт черги з JSON-файлу (команда export на ПК). Повертає {added, skipped, total}. */
-    fun importTargets(context: Context, rawJson: String): JSONObject {
-        val raw = module(context).callAttr("import_targets_json", rawJson).toString()
-        return JSONObject(raw)
-    }
-
-    /** Записати рядок у журнал подій (Python-лог). */
-    fun logExternal(context: Context, message: String) {
-        module(context).callAttr("log_external", message)
-    }
+    fun importTargets(context: Context, rawJson: String): JSONObject =
+        JSONObject(module(context).callAttr("import_targets_json", rawJson).toString())
 }

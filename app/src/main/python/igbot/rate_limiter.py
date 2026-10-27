@@ -2,8 +2,6 @@ from __future__ import annotations
 import random, time
 from datetime import datetime, timedelta
 from threading import Event
-from typing import Optional
-from . import state
 from .database import Database
 from .settings import Settings
 from .utils import fmt_secs, get_local_tz, nap

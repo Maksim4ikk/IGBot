@@ -13,7 +13,6 @@ from .instagram_client import WebInstaClient
 from .settings import Settings
 from .rate_limiter import RateLimiter
 from .state import log
-from .utils import fmt_secs
 
 def init_android_env(files_dir: str) -> None:
     state.APP_DIR = Path(files_dir)
@@ -22,7 +21,7 @@ def init_android_env(files_dir: str) -> None:
     root.setLevel(logging.INFO)
     if not any(isinstance(handler, state.MemoryLogHandler) for handler in root.handlers):
         handler = state.MemoryLogHandler()
-        handler.setFormatter(logging.Formatter("%(asctime)s | %(message)s", datefmt="%H:%M:%S"))
+        handler.setFormatter(logging.Formatter("%(asctime)s|%(levelname).1s|%(message)s", datefmt="%H:%M:%S"))
         root.addHandler(handler)
         logging.getLogger("urllib3").setLevel(logging.WARNING)
     try:
@@ -39,7 +38,7 @@ def init_android_env(files_dir: str) -> None:
 def get_dashboard_json() -> str:
     cfg = Settings.load()
     db = Database()
-    stats = db.stats()
+    counts = db.dashboard_counts()
     now = time.time()
     acc = cfg.main_username.strip()
 
@@ -67,10 +66,10 @@ def get_dashboard_json() -> str:
         "worker_running": state.WORKER_RUNNING,
         "scraper_running": state.SCRAPER_RUNNING,
         "scraper_task": state.SCRAPER_TASK,
-        "ready": stats.get("ready", 0),
-        "interacted": stats.get("interacted", 0),
-        "skipped": sum(v for k, v in stats.items() if k.startswith("skipped")),
-        "errors": stats.get("error", 0) + stats.get("gone", 0),
+        "ready": counts["ready"],
+        "interacted": counts["interacted"],
+        "skipped": counts["skipped"],
+        "errors": counts["errors"],
         "warmup": warmup,
         "likes_today": likes_today,
         "likes_day_max": likes_day_max,
@@ -80,9 +79,25 @@ def get_dashboard_json() -> str:
         "stories_day_max": stories_day_max,
         "stories_hr": stories_hr,
         "stories_hr_max": stories_hr_max,
-        "logs": list(state.LOG_BUFFER)[-60:],
+        "last_event": state.LOG_BUFFER[-1] if state.LOG_BUFFER else "",
     }
     return json.dumps(payload, ensure_ascii=False)
+
+
+def get_logs_json(limit: int = 300) -> str:
+    """Останні рядки журналу формату «ГГ:ХХ:СС|рівень|текст» (від старих до нових)."""
+    return json.dumps(list(state.LOG_BUFFER)[-int(limit):], ensure_ascii=False)
+
+
+def clear_logs() -> None:
+    state.LOG_BUFFER.clear()
+
+
+def clear_counter(kind: str) -> str:
+    """Очистити плитку «Огляду»: ready | interacted | skipped | errors. Повертає {"cleared": N}."""
+    n = Database().clear_counter(kind)
+    log.info("Очищено «%s»: %d", kind, n)
+    return json.dumps({"cleared": n})
 
 
 def import_targets_json(raw_json: str) -> str:
@@ -125,11 +140,6 @@ def import_targets_json(raw_json: str) -> str:
             skipped += 1
     log.info("Імпорт з JSON: додано %d, пропущено %d (з %d)", added, skipped, len(items))
     return json.dumps({"added": added, "skipped": skipped, "total": len(items)}, ensure_ascii=False)
-
-
-def log_external(message: str) -> None:
-    """Запис у журнал подій із Kotlin (тест мосту WebView)."""
-    log.info("%s", message)
 
 
 def get_settings_json() -> str:

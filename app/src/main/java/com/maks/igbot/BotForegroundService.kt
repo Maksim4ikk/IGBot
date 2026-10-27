@@ -29,6 +29,10 @@ class BotForegroundService : Service() {
     private var monitorJob: Job? = null
     private val channelId = "igbot_background_channel"
 
+    private companion object {
+        const val IDLE_STOP_MS = 2 * 60 * 1000L // вимкнути сервіс, якщо 2 хв нічого не працює (економія батареї)
+    }
+
     override fun onCreate() {
         super.onCreate()
         BotEngine.ensureInit(this)
@@ -59,7 +63,7 @@ class BotForegroundService : Service() {
         } else if (action == "START_SCRAPER") {
             val stype = intent?.getStringExtra("source_type") ?: "followers"
             val target = intent?.getStringExtra("target") ?: ""
-            val amount = intent?.getIntExtra("amount", 100) ?: 100
+            val amount = intent?.getIntExtra("amount", 0) ?: 0
             BotEngine.startScraper(this, stype, target, amount)
         }
 
@@ -70,6 +74,7 @@ class BotForegroundService : Service() {
     private fun startStatusUpdater() {
         if (monitorJob?.isActive == true) return
         monitorJob = CoroutineScope(Dispatchers.IO).launch {
+            var idleSince = 0L
             while (isActive) {
                 try {
                     val dash = BotEngine.getDashboardJson(this@BotForegroundService)
@@ -78,6 +83,19 @@ class BotForegroundService : Service() {
                     val likesToday = dash.optInt("likes_today", 0)
                     val likesMax = dash.optInt("likes_day_max", 120)
                     val ready = dash.optInt("ready", 0)
+
+                    // Нічого не працює вже давно — зупиняємо сервіс і знімаємо wake lock
+                    if (!wRun && !sRun) {
+                        val now = System.currentTimeMillis()
+                        if (idleSince == 0L) idleSince = now
+                        if (now - idleSince > IDLE_STOP_MS) {
+                            stopForeground(STOP_FOREGROUND_REMOVE)
+                            stopSelf()
+                            return@launch
+                        }
+                    } else {
+                        idleSince = 0L
+                    }
 
                     val statusText = when {
                         wRun && sRun -> "Воркер + Парсер | ❤️ $likesToday/$likesMax | Черга: $ready"
