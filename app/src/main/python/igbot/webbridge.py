@@ -86,6 +86,10 @@ class WebBridge:
         На відміну від API (не більше ~100) тут список прокручується до потрібної кількості."""
         return self._call("postLikers", code, int(amount))
 
+    def post_commenters(self, code: str, amount: int) -> WebResult:
+        """Автори коментарів зі сторінки коментарів поста (ok + names | unknown). Запасний шлях, коли API не віддав."""
+        return self._call("postCommenters", code, int(amount))
+
 
 def request_cancel() -> None:
     """Просить Kotlin-міст перервати довгу операцію (прокрутку списку). Поза Android нічого не робить."""

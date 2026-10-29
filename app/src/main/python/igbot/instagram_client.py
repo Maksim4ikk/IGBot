@@ -286,6 +286,42 @@ class WebInstaClient:
             for u in data.get("users") or []
         ]
 
+    def media_commenters(self, media_pk: int, max_amount: int = 100) -> list[UserShort]:
+        """Автори коментарів верхнього рівня (без повторів), до max_amount людей.
+        Коментарі приходять сторінками: у відповіді є курсор (next_min_id або next_max_id), який передаємо далі."""
+        users: list[UserShort] = []
+        seen: set[int] = set()
+        cursor_param, cursor = "", ""
+        for _ in range(300):  # запобіжник від нескінченного циклу
+            query = "can_support_threading=true&permalink_enabled=false"
+            if cursor:
+                query += f"&{cursor_param}={quote(cursor, safe='')}"
+            data = self._req("GET", f"{self.API}/media/{media_pk}/comments/?{query}",
+                             context="коментарі", quiet_html=True)
+            for c in data.get("comments") or []:
+                u = c.get("user") or {}
+                raw_pk = u.get("pk") or u.get("pk_id") or c.get("user_id")
+                username = u.get("username", "")
+                if not raw_pk or not username:
+                    continue
+                pk = int(raw_pk)
+                if pk in seen:
+                    continue
+                seen.add(pk)
+                users.append(UserShort(
+                    pk=pk, username=username, full_name=u.get("full_name", "") or "",
+                    is_private=u.get("is_private")))
+                if len(users) >= max_amount:
+                    return users
+            nxt, param = data.get("next_min_id"), "min_id"
+            if not nxt:
+                nxt, param = data.get("next_max_id"), "max_id"
+            if not nxt or data.get("has_more_comments") is False:
+                break
+            cursor_param = param
+            cursor = nxt if isinstance(nxt, str) else json.dumps(nxt)
+        return users
+
     # ── сторіс ──────────────────────────────────────────────────────
 
     def user_stories(self, uid: int) -> list[StoryItem]:

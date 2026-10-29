@@ -61,6 +61,10 @@ class ScraperBot(BaseBot):
             self._scrape_likers(target, amount)
         elif source_type == "account_likers":
             self._scrape_account_likers(target.lstrip("@"), amount)
+        elif source_type == "commenters":
+            self._scrape_commenters(target, amount)
+        elif source_type == "account_commenters":
+            self._scrape_account_commenters(target.lstrip("@"), amount)
         elif source_type == "hashtag":
             self._scrape_hashtag(target.lstrip("#"), amount)
         else:
@@ -130,6 +134,72 @@ class ScraperBot(BaseBot):
         if not users:
             raise StopWork(f"Не вдалося отримати лайкерів постів @{uname}")
         self._process(users[:amount], f"account_likers:{uname}")
+
+    def _scrape_commenters(self, url: str, amount: int) -> None:
+        """Ті, хто прокоментував пост (автори коментарів верхнього рівня)."""
+        try:
+            code = shortcode_from_url(url)
+            shortcode_to_pk(code)
+        except ValueError as e:
+            raise StopWork(str(e))
+        log.info("[Парсер] Завантажую коментаторів поста (потрібно до %d)...", amount)
+        users = self._commenters_of(code, amount)
+        if not users:
+            raise StopWork("Не вдалося отримати коментаторів поста (немає коментарів або список недоступний)")
+        self._process(users[:amount], f"commenters:{shortcode_to_pk(code)}")
+
+    def _scrape_account_commenters(self, uname: str, amount: int) -> None:
+        """Автори коментарів під кількома останніми постами акаунта (власник акаунта виключається)."""
+        log.info("[Парсер] Шукаю останні пости @%s...", uname)
+        res = self.web.latest_posts(uname)
+        if res.status == "not_found":
+            raise StopWork(f"Акаунт @{uname} не знайдено")
+        if res.status == "private":
+            raise StopWork(f"Акаунт @{uname} приватний — коментарів його постів не видно")
+        codes = sorted(res.list("codes"), key=_safe_pk, reverse=True)  # свіжіші першими
+        if not codes:
+            raise StopWork(f"У @{uname} не знайдено постів ({res.status})")
+        log.info("[Парсер] Знайдено постів: %d. Збираю коментаторів (до %d людей)...", len(codes), amount)
+
+        users: list[UserShort] = []
+        seen: set[str] = {uname.lower()}
+        for i, code in enumerate(codes, 1):
+            if self.stop_event.is_set() or len(users) >= amount:
+                break
+            batch = self._commenters_of(code, amount - len(users))  # скільки ще потрібно
+            added = 0
+            for u in batch:
+                key = u.username.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                users.append(u)
+                added += 1
+            log.info("[Парсер] Пост %d/%d (%s): коментаторів %d, нових %d, усього %d",
+                     i, len(codes), code, len(batch), added, len(users))
+            human_pause(self.cfg.scrape_delay_min, self.cfg.scrape_delay_max, self.stop_event)
+        if not users:
+            raise StopWork(f"Не вдалося отримати коментаторів постів @{uname}")
+        self._process(users[:amount], f"account_commenters:{uname}")
+
+    def _commenters_of(self, code: str, want: int) -> list[UserShort]:
+        """Коментатори одного поста: спершу API (зі сторінками), а якщо він нічого не віддав — сторінка
+        коментарів у WebView."""
+        users: list[UserShort] = []
+        try:
+            users = list(self.api(self.cl.media_commenters, shortcode_to_pk(code), want))
+        except (ApiError, UserNotFound) as e:
+            log.warning("[Парсер] API не віддав коментаторів (%s): %s", code, e)
+        if users:
+            return users
+        log.info("[Парсер] Читаю коментарі у WebView...")
+        res = self.web.post_commenters(code, want)
+        names = res.list("names")
+        if not names:
+            log.warning("[Парсер] Коментаторів у WebView не знайдено: %s (%s)", res.status, res.detail[:120])
+            return []
+        # ID зі сторінки невідомий, приватність теж — з'ясується на сторінці профілю
+        return [UserShort(pk=pseudo_user_id(n), username=n, full_name="", is_private=None) for n in names]
 
     def _likers_from_web(self, code: str, amount: int, known: set[str]) -> list[UserShort]:
         log.info("[Парсер] Читаю повний список лайкерів у WebView (може тривати кілька хвилин)...")

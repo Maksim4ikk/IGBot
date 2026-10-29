@@ -51,7 +51,14 @@ import kotlinx.coroutines.withContext
 // ════════════════════════════════════════════════════════════════════
 @Composable
 fun ScraperScreen(context: Context, scraperRunning: Boolean, scraperTask: String) {
-    var sourceType by remember { mutableStateOf("followers") }
+    // Джерело = вид (підписники / лайкери / коментатори / хештег) + для лайкерів і коментаторів: звідки брати
+    var kind by remember { mutableStateOf("followers") }
+    var fromAccount by remember { mutableStateOf(false) }  // false — один пост, true — останні пости акаунта
+    val sourceType = when (kind) {
+        "likers" -> if (fromAccount) "account_likers" else "likers"
+        "commenters" -> if (fromAccount) "account_commenters" else "commenters"
+        else -> kind
+    }
     var targetInput by remember { mutableStateOf("") }
     var settingsAmount by remember { mutableStateOf(0) }
     var settingsDelay by remember { mutableStateOf("") }
@@ -101,35 +108,30 @@ fun ScraperScreen(context: Context, scraperRunning: Boolean, scraperTask: String
                 modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                FilterChip(
-                    selected = sourceType == "followers",
-                    onClick = { sourceType = "followers" },
-                    label = { Text("Підписники") }
-                )
-                FilterChip(
-                    selected = sourceType == "likers",
-                    onClick = { sourceType = "likers" },
-                    label = { Text("Лайкери поста") }
-                )
-                FilterChip(
-                    selected = sourceType == "account_likers",
-                    onClick = { sourceType = "account_likers" },
-                    label = { Text("Лайкери акаунта") }
-                )
-                FilterChip(
-                    selected = sourceType == "hashtag",
-                    onClick = { sourceType = "hashtag" },
-                    label = { Text("Хештег") }
-                )
+                FilterChip(selected = kind == "followers", onClick = { kind = "followers" }, label = { Text("Підписники") })
+                FilterChip(selected = kind == "likers", onClick = { kind = "likers" }, label = { Text("Лайкери") })
+                FilterChip(selected = kind == "commenters", onClick = { kind = "commenters" }, label = { Text("Коментатори") })
+                FilterChip(selected = kind == "hashtag", onClick = { kind = "hashtag" }, label = { Text("Хештег") })
+            }
+
+            if (kind == "likers" || kind == "commenters") {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(selected = !fromAccount, onClick = { fromAccount = false }, label = { Text("З одного поста") })
+                    FilterChip(selected = fromAccount, onClick = { fromAccount = true }, label = { Text("З постів акаунта") })
+                }
             }
 
             Text(
                 when (sourceType) {
                     "followers" -> "Бере підписників акаунта-донора, відсіює приватні та магазини, знаходить свіжий пост."
                     "likers" -> "Бере людей, які лайкнули пост. Instagram віддає для чужого поста лише ~100 лайкерів " +
-                        "(інколи до кількох сотень) — для більшої бази оберіть «Лайкери акаунта»."
+                        "(інколи до кількох сотень) — для більшої бази оберіть «З постів акаунта»."
                     "account_likers" -> "Бере лайкерів кількох останніх постів акаунта: кожен пост дає до ~100 людей, " +
                         "дублі відсіюються. Так можна зібрати сотні активних людей."
+                    "commenters" -> "Бере тих, хто прокоментував пост (автори коментарів). Це найактивніша аудиторія: " +
+                        "люди, які не лише лайкнули, а й написали."
+                    "account_commenters" -> "Бере авторів коментарів під кількома останніми постами акаунта. " +
+                        "Дублі та сам власник акаунта відсіюються."
                     else -> "Відкриває сторінку хештегу, дізнається авторів постів і лайкатиме саме ці пости."
                 },
                 style = MaterialTheme.typography.bodyMedium,
@@ -144,7 +146,8 @@ fun ScraperScreen(context: Context, scraperRunning: Boolean, scraperTask: String
                         when (sourceType) {
                             "followers" -> "Нікнейм донора (наприклад: kyiv_coffee)"
                             "likers" -> "Посилання на пост (https://www.instagram.com/p/...)"
-                            "account_likers" -> "Нікнейм акаунта (наприклад: kyiv_coffee)"
+                            "account_likers", "account_commenters" -> "Нікнейм акаунта (наприклад: kyiv_coffee)"
+                            "commenters" -> "Посилання на пост (https://www.instagram.com/p/...)"
                             else -> "Хештег без # (наприклад: київкава)"
                         }
                     )

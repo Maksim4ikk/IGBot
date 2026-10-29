@@ -286,4 +286,59 @@ internal object WebScripts {
           return best ? 'container' : 'window';
         })();
     """.trimIndent()
+
+    /**
+     * Сторінка коментарів поста: нікнейми авторів коментарів.
+     * Автор коментаря — перше посилання на профіль у блоці коментаря (згадки @нік у тексті йдуть пізніше).
+     * Блок коментаря знаходимо від позначки часу <time>: піднімаємось до найближчого елемента з посиланням на профіль.
+     */
+    val COMMENTERS_JS = """
+        (function () {
+          var res = {status: 'wait', names: '', count: 0, title: (document.title || '').slice(0, 60),
+                     path: location.pathname.slice(0, 50), text: ''};
+          if (location.pathname.indexOf('/accounts/login') === 0 || document.querySelector('input[name="username"]')) {
+            res.status = 'login';
+            return JSON.stringify(res);
+          }
+          var SKIP = ['explore','reels','reel','direct','accounts','p','stories','notifications','about','legal',
+                      'privacy','terms','directory','developers','api','web','static','emails','challenge','session',
+                      'login','nametag','settings','create','ads','blog','help','tv','lite','topics','locations',
+                      'tags','archive','saved','activity','threads','meta','download','oauth'];
+          function firstUser(root) {
+            var as = root.querySelectorAll('a[href]');
+            for (var i = 0; i < as.length; i++) {
+              if (as[i].closest('nav, header')) continue;
+              var m = /^\/([A-Za-z0-9._]{1,30})\/$/.exec(as[i].getAttribute('href') || '');
+              if (m && SKIP.indexOf(m[1].toLowerCase()) < 0) return m[1];
+            }
+            return '';
+          }
+          var seen = {}, names = [];
+          function add(u) {
+            var key = u.toLowerCase();
+            if (u && !seen[key]) { seen[key] = 1; names.push(u); }
+          }
+          var times = document.querySelectorAll('time');
+          for (var t = 0; t < times.length; t++) {
+            var node = times[t].parentElement, u = '';
+            for (var depth = 0; node && depth < 8 && !u; depth++) {
+              u = firstUser(node);
+              node = node.parentElement;
+            }
+            add(u);
+          }
+          if (!names.length) {  // резерв: коментарі як елементи списку
+            var items = document.querySelectorAll('ul li, [role="listitem"]');
+            for (var k = 0; k < items.length; k++) add(firstUser(items[k]));
+          }
+          res.count = names.length;
+          res.names = names.join(',');
+          if (names.length) {
+            res.status = 'ok';
+          } else {
+            res.text = ((document.body && document.body.innerText) || '').replace(/\s+/g, ' ').slice(0, 100);
+          }
+          return JSON.stringify(res);
+        })();
+    """.trimIndent()
 }

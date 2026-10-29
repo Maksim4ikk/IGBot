@@ -61,6 +61,11 @@ object WebBridge {
     fun postLikers(code: String, amount: Int, userAgent: String, cookiesJson: String): String =
         guarded { doPostLikers(code, amount, userAgent, cookiesJson) }
 
+    /** Автори коментарів поста (прокрутка сторінки коментарів). ok(+names) | unknown | login | timeout */
+    @JvmStatic
+    fun postCommenters(code: String, amount: Int, userAgent: String, cookiesJson: String): String =
+        guarded { doPostCommenters(code, amount, userAgent, cookiesJson) }
+
     // ── реалізація ──────────────────────────────────────────────────
     private fun guarded(block: suspend () -> String): String =
         try {
@@ -187,8 +192,23 @@ object WebBridge {
 
     private suspend fun doPostLikers(code: String, amount: Int, ua: String, cookiesJson: String): String {
         if (!CODE_RE.matches(code)) return result("error", "невірний код поста: $code")
-        val wv = WebSession.open("${WebSession.BASE}/p/$code/liked_by/", ua, cookiesJson)
-            ?: return result("timeout", "сторінка «Вподобання» не завантажилась за 30 с")
+        return scrollCollect("${WebSession.BASE}/p/$code/liked_by/", WebScripts.LIKERS_JS, amount, ua, cookiesJson, "Вподобання")
+    }
+
+    private suspend fun doPostCommenters(code: String, amount: Int, ua: String, cookiesJson: String): String {
+        if (!CODE_RE.matches(code)) return result("error", "невірний код поста: $code")
+        return scrollCollect("${WebSession.BASE}/p/$code/comments/", WebScripts.COMMENTERS_JS, amount, ua, cookiesJson, "Коментарі")
+    }
+
+    /**
+     * Відкриває сторінку зі списком людей, прокручує її та збирає нікнейми скриптом (він повертає names/count).
+     * Зупиняється, коли набрано потрібну кількість, список перестав зростати або натиснули «Зупинити».
+     */
+    private suspend fun scrollCollect(
+        url: String, script: String, amount: Int, ua: String, cookiesJson: String, what: String
+    ): String {
+        val wv = WebSession.open(url, ua, cookiesJson)
+            ?: return result("timeout", "сторінка «$what» не завантажилась за 30 с")
 
         val want = amount.coerceIn(1, MAX_LIST)
         var st = JSONObject()
@@ -199,7 +219,7 @@ object WebBridge {
         while (rounds < 600 && !cancelled) {
             rounds++
             delay(if (rounds == 1) 3000 else 1500)
-            st = WebSession.evalJson(wv, WebScripts.LIKERS_JS)
+            st = WebSession.evalJson(wv, script)
             if (st.optString("status") == "login") break
             val cnt = st.optInt("count", 0)
             if (cnt > bestCount) {
