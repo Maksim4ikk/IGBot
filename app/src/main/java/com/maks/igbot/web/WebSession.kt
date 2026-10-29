@@ -2,6 +2,7 @@ package com.maks.igbot.web
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.view.View
 import android.webkit.CookieManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -95,6 +96,12 @@ internal object WebSession {
             wv.settings.javaScriptEnabled = true
             wv.settings.domStorageEnabled = true
             if (ua.isNotBlank()) wv.settings.userAgentString = ua
+            // Невидимому WebView потрібен розмір вікна, інакше сторінка не підвантажує списки при прокрутці
+            wv.measure(
+                View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(2400, View.MeasureSpec.EXACTLY)
+            )
+            wv.layout(0, 0, 1080, 2400)
             CookieManager.getInstance().setAcceptCookie(true)
             CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
             wv.webViewClient = object : WebViewClient() {

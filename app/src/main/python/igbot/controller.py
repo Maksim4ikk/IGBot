@@ -8,6 +8,7 @@ from .database import Database
 from .errors import StopWork
 from .settings import Settings
 from .state import log
+from .webbridge import request_cancel
 
 
 def _reason(e: Exception) -> str:
@@ -38,6 +39,7 @@ def start_worker_thread() -> None:
 def stop_worker_thread() -> None:
     log.info("Зупинка Воркера...")
     state.STOP_WORKER.set()
+    request_cancel()
 
 
 def start_scraper_thread(source_type: str, target: str, amount: int = 0) -> None:
@@ -64,3 +66,4 @@ def start_scraper_thread(source_type: str, target: str, amount: int = 0) -> None
 def stop_scraper_thread() -> None:
     log.info("Зупинка Парсера...")
     state.STOP_SCRAPER.set()
+    request_cancel()

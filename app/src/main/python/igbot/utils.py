@@ -1,4 +1,5 @@
 from __future__ import annotations
+import hashlib
 import random, re, threading, time
 from datetime import datetime, timezone
 from typing import Optional
@@ -73,11 +74,22 @@ def pk_to_shortcode(pk: int) -> str:
     return out
 
 
-def media_pk_from_url(url: str) -> int:
+def shortcode_from_url(url: str) -> str:
+    """Код поста з посилання (https://www.instagram.com/p/DewhcNrjtfV/?x=1 -> DewhcNrjtfV)."""
     m = re.search(r"/(?:p|reel|tv)/([A-Za-z0-9_-]+)", url)
     if not m:
         raise ValueError("Невірне посилання на пост")
-    return shortcode_to_pk(m.group(1))
+    return m.group(1)
+
+
+def media_pk_from_url(url: str) -> int:
+    return shortcode_to_pk(shortcode_from_url(url))
+
+
+def pseudo_user_id(username: str) -> int:
+    """Стабільний від'ємний ID для людини, чий справжній числовий ID невідомий (читали зі сторінки).
+    Від'ємний, щоб не збігтися зі справжніми ID; дублікати з справжніми ID відсікає перевірка за нікнеймом."""
+    return -int(hashlib.sha1(username.lower().encode("utf-8")).hexdigest()[:12], 16)
 
 
 def freshest_code(codes) -> Optional[str]:

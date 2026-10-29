@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -52,17 +53,17 @@ import kotlinx.coroutines.withContext
 fun ScraperScreen(context: Context, scraperRunning: Boolean, scraperTask: String) {
     var sourceType by remember { mutableStateOf("followers") }
     var targetInput by remember { mutableStateOf("") }
-    var settingsHint by remember { mutableStateOf("") }
+    var settingsAmount by remember { mutableStateOf(0) }
+    var settingsDelay by remember { mutableStateOf("") }
 
     // Кількість анкет і паузи задаються у вкладці «Ліміти» — тут лише показуємо поточні значення
     LaunchedEffect(Unit) {
         val cfg = withContext(Dispatchers.IO) { BotEngine.getSettingsJson(context) }
-        val amount = cfg.optInt("scrape_amount", 50)
-        val dMin = cfg.optDouble("scrape_delay_min", 8.0)
-        val dMax = cfg.optDouble("scrape_delay_max", 15.0)
-        settingsHint = "Збір за запуск: $amount · пауза між анкетами ${dMin.toInt()}–${dMax.toInt()} с. " +
-            "Змінити можна у вкладці «Ліміти»."
+        settingsAmount = cfg.optInt("scrape_amount", 50)
+        settingsDelay = "${cfg.optDouble("scrape_delay_min", 8.0).toInt()}–${cfg.optDouble("scrape_delay_max", 15.0).toInt()} с"
     }
+    val settingsHint = if (settingsAmount == 0) "" else
+        "Збір за запуск: $settingsAmount · пауза між анкетами $settingsDelay. Змінити можна у вкладці «Ліміти»."
 
     val importScope = rememberCoroutineScope()
     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -96,7 +97,10 @@ fun ScraperScreen(context: Context, scraperRunning: Boolean, scraperTask: String
         AppCard {
             SectionTitle("Нове завдання", "🔎")
 
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 FilterChip(
                     selected = sourceType == "followers",
                     onClick = { sourceType = "followers" },
@@ -108,6 +112,11 @@ fun ScraperScreen(context: Context, scraperRunning: Boolean, scraperTask: String
                     label = { Text("Лайкери поста") }
                 )
                 FilterChip(
+                    selected = sourceType == "account_likers",
+                    onClick = { sourceType = "account_likers" },
+                    label = { Text("Лайкери акаунта") }
+                )
+                FilterChip(
                     selected = sourceType == "hashtag",
                     onClick = { sourceType = "hashtag" },
                     label = { Text("Хештег") }
@@ -117,7 +126,10 @@ fun ScraperScreen(context: Context, scraperRunning: Boolean, scraperTask: String
             Text(
                 when (sourceType) {
                     "followers" -> "Бере підписників акаунта-донора, відсіює приватні та магазини, знаходить свіжий пост."
-                    "likers" -> "Бере людей, які лайкнули пост, відсіює приватні та магазини, знаходить свіжий пост."
+                    "likers" -> "Бере людей, які лайкнули пост. Instagram віддає для чужого поста лише ~100 лайкерів " +
+                        "(інколи до кількох сотень) — для більшої бази оберіть «Лайкери акаунта»."
+                    "account_likers" -> "Бере лайкерів кількох останніх постів акаунта: кожен пост дає до ~100 людей, " +
+                        "дублі відсіюються. Так можна зібрати сотні активних людей."
                     else -> "Відкриває сторінку хештегу, дізнається авторів постів і лайкатиме саме ці пости."
                 },
                 style = MaterialTheme.typography.bodyMedium,
@@ -132,6 +144,7 @@ fun ScraperScreen(context: Context, scraperRunning: Boolean, scraperTask: String
                         when (sourceType) {
                             "followers" -> "Нікнейм донора (наприклад: kyiv_coffee)"
                             "likers" -> "Посилання на пост (https://www.instagram.com/p/...)"
+                            "account_likers" -> "Нікнейм акаунта (наприклад: kyiv_coffee)"
                             else -> "Хештег без # (наприклад: київкава)"
                         }
                     )
@@ -148,7 +161,7 @@ fun ScraperScreen(context: Context, scraperRunning: Boolean, scraperTask: String
                         Toast.makeText(context, "Введіть ціль для парсингу!", Toast.LENGTH_SHORT).show()
                         return@Button
                     }
-                    // amount не передаємо: Python бере кількість із налаштувань («Ліміти»)
+                    // кількість береться з налаштувань («Ліміти») — Python отримує 0
                     val intent = Intent(context, BotForegroundService::class.java).apply {
                         action = "START_SCRAPER"
                         putExtra("source_type", sourceType)

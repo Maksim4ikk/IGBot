@@ -160,7 +160,7 @@ fun LimitsScreen(context: Context) {
                     cfg.put("active_start_hour", (startHour.toIntOrNull() ?: 9).coerceIn(0, 22))
                     cfg.put("active_end_hour", (endHour.toIntOrNull() ?: 23).coerceIn(1, 24))
 
-                    cfg.put("scrape_amount", (scrapeAmount.toIntOrNull() ?: 50).coerceIn(1, 500))
+                    cfg.put("scrape_amount", (scrapeAmount.toIntOrNull() ?: 50).coerceIn(1, 5000))
                     val dMin = parseNum(scrapeDelayMin, 8.0).coerceAtLeast(1.0)
                     val dMax = parseNum(scrapeDelayMax, 15.0).coerceAtLeast(dMin)
                     cfg.put("scrape_delay_min", dMin)

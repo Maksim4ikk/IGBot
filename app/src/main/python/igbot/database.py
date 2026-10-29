@@ -22,6 +22,7 @@ class Database:
                 updated_at REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_targets_status ON targets(status, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_targets_username ON targets(username COLLATE NOCASE);
             CREATE TABLE IF NOT EXISTS action_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 account TEXT NOT NULL,
@@ -36,6 +37,13 @@ class Database:
 
     def exists(self, uid: int) -> bool:
         return self.conn.execute("SELECT 1 FROM targets WHERE user_id=?", (uid,)).fetchone() is not None
+
+    def exists_username(self, username: str) -> bool:
+        """Чи є людина з таким нікнеймом (без урахування регістру) — захист від дублів, коли ID різні."""
+        if not username:
+            return False
+        return self.conn.execute(
+            "SELECT 1 FROM targets WHERE username = ? COLLATE NOCASE LIMIT 1", (username,)).fetchone() is not None
 
     def add_target(self, uid: int, username: str, status: str, source: str = "",
                    media_id: Optional[str] = None, media_code: Optional[str] = None) -> bool:

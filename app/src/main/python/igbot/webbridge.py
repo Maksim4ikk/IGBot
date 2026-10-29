@@ -50,7 +50,10 @@ class WebBridge:
             from java import jclass  # доступно лише в Chaquopy (Android)
         except ImportError as e:
             raise StopWork("Ця функція працює лише в Android-застосунку") from e
-        raw = getattr(jclass(BRIDGE_CLASS), fn)(*args, self._ua, self._cookies_json())
+        try:
+            raw = getattr(jclass(BRIDGE_CLASS), fn)(*args, self._ua, self._cookies_json())
+        except UnicodeError as e:  # напр. обрізаний посередині емодзі в тексті сторінки
+            return WebResult("error", {}, f"некоректний текст від WebView: {e}")
         data = json.loads(str(raw))
         status = str(data.get("status", "error"))
         if status in ("login", "login_required"):
@@ -77,3 +80,17 @@ class WebBridge:
     def post_author(self, code: str) -> WebResult:
         """Автор поста (ok + username, ids | unknown)."""
         return self._call("postAuthor", code)
+
+    def post_likers(self, code: str, amount: int) -> WebResult:
+        """Повний список тих, хто лайкнув пост, з екрана «Вподобання» (ok + names | unknown).
+        На відміну від API (не більше ~100) тут список прокручується до потрібної кількості."""
+        return self._call("postLikers", code, int(amount))
+
+
+def request_cancel() -> None:
+    """Просить Kotlin-міст перервати довгу операцію (прокрутку списку). Поза Android нічого не робить."""
+    try:
+        from java import jclass
+        jclass(BRIDGE_CLASS).cancel()
+    except Exception:
+        pass

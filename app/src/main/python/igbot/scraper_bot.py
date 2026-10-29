@@ -3,7 +3,7 @@
 Профілі відкриваються у WebView (див. webbridge.py), бо запити профілів через API Instagram блокує.
 """
 from __future__ import annotations
-import hashlib, random
+import random
 from collections import Counter
 from datetime import datetime, timezone
 from .base_bot import BaseBot
@@ -13,8 +13,10 @@ from .models import MediaItem, UserShort
 from .settings import Settings
 from .state import log, STOP_SCRAPER
 from .utils import (
-    build_stop_regex, freshest_code, human_pause, media_pk_from_url, nap, shortcode_to_pk,
+    build_stop_regex, freshest_code, human_pause, nap, pseudo_user_id, shortcode_from_url, shortcode_to_pk,
 )
+
+LIKERS_API_PAGE = 100   # стільки лайкерів API віддає за раз (Instagram не показує більше для чужих постів)
 
 # Зрозумілі підписи статусів для журналу (в БД лишаються технічні назви)
 STATUS_TEXT = {
@@ -24,6 +26,13 @@ STATUS_TEXT = {
     "skipped_commercial": "магазин/бізнес — пропущено",
     "skipped_numbers": "не підходить за цифрами — пропущено",
 }
+
+
+def _safe_pk(code: str) -> int:
+    try:
+        return shortcode_to_pk(code)
+    except ValueError:
+        return -1
 
 
 class ScraperBot(BaseBot):
@@ -43,12 +52,15 @@ class ScraperBot(BaseBot):
 
     # ── точка входу ─────────────────────────────────────────────────
     def scrape(self, source_type: str, target: str, amount: int = 0) -> None:
+        """amount: 0 — кількість із налаштувань («Ліміти»), додатне — рівно стільки."""
         amount = int(amount) or int(self.cfg.scrape_amount)
         target = target.strip()
         if source_type == "followers":
             self._scrape_followers(target.lstrip("@"), amount)
         elif source_type == "likers":
             self._scrape_likers(target, amount)
+        elif source_type == "account_likers":
+            self._scrape_account_likers(target.lstrip("@"), amount)
         elif source_type == "hashtag":
             self._scrape_hashtag(target.lstrip("#"), amount)
         else:
@@ -57,12 +69,84 @@ class ScraperBot(BaseBot):
     # ── джерела ─────────────────────────────────────────────────────
     def _scrape_likers(self, url: str, amount: int) -> None:
         try:
-            pk = media_pk_from_url(url)
+            code = shortcode_from_url(url)
+            pk = shortcode_to_pk(code)
         except ValueError as e:
             raise StopWork(str(e))
-        log.info("[Парсер] Завантажую лайкерів поста...")
-        likers = self.api(self.cl.media_likers, pk)
-        self._process(likers[:amount], f"likers:{pk}")
+        log.info("[Парсер] Завантажую лайкерів поста (потрібно до %d)...", amount)
+
+        users: list[UserShort] = []
+        api_ok = True
+        try:
+            users = list(self.api(self.cl.media_likers, pk))
+        except (ApiError, UserNotFound) as e:
+            api_ok = False
+            log.warning("[Парсер] API не віддав лайкерів: %s", e)
+        log.info("[Парсер] API віддав лайкерів: %d", len(users))
+
+        # API віддає не більше ~100 за раз і не має сторінок. Якщо потрібно більше (або API не спрацював) —
+        # читаємо повний список «Вподобання» у WebView.
+        if len(users) < amount and (not api_ok or len(users) >= LIKERS_API_PAGE - 10):
+            users += self._likers_from_web(code, amount, {u.username.lower() for u in users})
+        if not users:
+            raise StopWork("Не вдалося отримати лайкерів поста (пост без лайків, приватний або список недоступний)")
+        self._process(users[:amount], f"likers:{pk}")
+
+    def _scrape_account_likers(self, uname: str, amount: int) -> None:
+        """Лайкери кількох останніх постів акаунта. Instagram віддає для одного чужого поста не більше
+        ~100 лайкерів, тому велику базу набираємо з кількох постів (дублі відсікаються)."""
+        log.info("[Парсер] Шукаю останні пости @%s...", uname)
+        res = self.web.latest_posts(uname)
+        if res.status == "not_found":
+            raise StopWork(f"Акаунт @{uname} не знайдено")
+        if res.status == "private":
+            raise StopWork(f"Акаунт @{uname} приватний — лайкерів його постів не видно")
+        codes = sorted(res.list("codes"), key=_safe_pk, reverse=True)  # свіжіші першими
+        if not codes:
+            raise StopWork(f"У @{uname} не знайдено постів ({res.status})")
+        log.info("[Парсер] Знайдено постів: %d. Збираю лайкерів (до %d людей)...", len(codes), amount)
+
+        users: list[UserShort] = []
+        seen: set[str] = set()
+        for i, code in enumerate(codes, 1):
+            if self.stop_event.is_set() or len(users) >= amount:
+                break
+            try:
+                batch = list(self.api(self.cl.media_likers, shortcode_to_pk(code)))
+            except (ApiError, UserNotFound) as e:
+                log.warning("[Парсер] Пост %d/%d (%s): лайкерів не отримано (%s)", i, len(codes), code, e)
+                continue
+            added = 0
+            for u in batch:
+                key = u.username.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                users.append(u)
+                added += 1
+            log.info("[Парсер] Пост %d/%d (%s): лайкерів %d, нових %d, усього %d",
+                     i, len(codes), code, len(batch), added, len(users))
+            human_pause(self.cfg.scrape_delay_min, self.cfg.scrape_delay_max, self.stop_event)
+        if not users:
+            raise StopWork(f"Не вдалося отримати лайкерів постів @{uname}")
+        self._process(users[:amount], f"account_likers:{uname}")
+
+    def _likers_from_web(self, code: str, amount: int, known: set[str]) -> list[UserShort]:
+        log.info("[Парсер] Читаю повний список лайкерів у WebView (може тривати кілька хвилин)...")
+        res = self.web.post_likers(code, amount)
+        names = res.list("names")
+        if not names:
+            log.warning("[Парсер] Список лайкерів у WebView не прочитано: %s (%s)", res.status, res.detail)
+            return []
+        extra: list[UserShort] = []
+        for n in names:
+            if n.lower() in known:
+                continue
+            known.add(n.lower())
+            # ID зі списку невідомий, приватність теж — це з'ясується на сторінці профілю
+            extra.append(UserShort(pk=pseudo_user_id(n), username=n, full_name="", is_private=None))
+        log.info("[Парсер] У WebView знайдено лайкерів: %d (додатково до API: %d)", len(names), len(extra))
+        return extra
 
     def _scrape_followers(self, uname: str, amount: int) -> None:
         log.info("[Парсер] Шукаю ID донора @%s...", uname)
@@ -129,7 +213,7 @@ class ScraperBot(BaseBot):
                     uid = int(s)
                     break
             if uid is None:  # справжній ID не знайшли — стабільний від'ємний ідентифікатор за нікнеймом
-                uid = -int(hashlib.sha1(uname.lower().encode("utf-8")).hexdigest()[:12], 16)
+                uid = pseudo_user_id(uname)
             user = UserShort(pk=uid, username=uname, full_name="", is_private=False)
             self.preset_medias[uid] = MediaItem(
                 id=str(mpk), pk=mpk, code=code, taken_at=datetime.now(tz=timezone.utc), user=user)
@@ -159,15 +243,15 @@ class ScraperBot(BaseBot):
         if res.status == "private":
             return uname, "skipped_private", None
         if res.status in ("no_posts", "not_found"):
-            log.info("[Парсер] @%s: %s (%s)", uname, res.status, res.detail)
             return uname, "skipped_dead", None
-        raise ApiError(f"WebView: {res.status} {res.detail}")
+        raise ApiError(f"WebView: {res.status} {res.detail[:160]}")
 
     def _next_break(self) -> int:
         return random.randint(self.cfg.scrape_break_every_min, self.cfg.scrape_break_every_max)
 
     def _process(self, cands: list[UserShort], source: str) -> None:
-        new = [u for u in cands if not self.db.exists(u.pk)]
+        # дубль і за ID, і за нікнеймом (ID зі списків у WebView — умовні, тому нікнейм надійніший)
+        new = [u for u in cands if not self.db.exists(u.pk) and not self.db.exists_username(u.username)]
         log.info("[Парсер] Отримано %d анкет (нових: %d)", len(cands), len(new))
         log.info("[Парсер] Відкриваю профілі у WebView та беру найсвіжіший пост (~10–20 с на анкету)")
         counter = Counter()

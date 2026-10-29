@@ -232,4 +232,58 @@ internal object WebScripts {
           return JSON.stringify(res);
         })();
     """.trimIndent()
+
+    /** Екран «Вподобання» під постом: нікнейми людей зі списку (лише з діалогу, якщо він відкритий). */
+    val LIKERS_JS = """
+        (function () {
+          var res = {status: 'wait', names: '', count: 0, title: (document.title || '').slice(0, 60),
+                     path: location.pathname.slice(0, 50), text: ''};
+          if (location.pathname.indexOf('/accounts/login') === 0 || document.querySelector('input[name="username"]')) {
+            res.status = 'login';
+            return JSON.stringify(res);
+          }
+          var SKIP = ['explore','reels','reel','direct','accounts','p','stories','notifications','about','legal',
+                      'privacy','terms','directory','developers','api','web','static','emails','challenge','session',
+                      'login','nametag','settings','create','ads','blog','help','tv','lite','topics','locations',
+                      'tags','archive','saved','activity','threads','meta','download','oauth'];
+          var scope = document.querySelector('[role="dialog"]') || document.body;
+          var as = scope.querySelectorAll('a[href]');
+          var seen = {}, names = [];
+          for (var i = 0; i < as.length; i++) {
+            var a = as[i];
+            var m = /^\/([A-Za-z0-9._]{1,30})\/$/.exec(a.getAttribute('href') || '');
+            if (!m) continue;
+            var u = m[1], key = u.toLowerCase();
+            if (SKIP.indexOf(key) >= 0 || seen[key]) continue;
+            if (a.closest('nav, header')) continue;
+            seen[key] = 1;
+            names.push(u);
+          }
+          res.count = names.length;
+          res.names = names.join(',');
+          if (names.length) {
+            res.status = 'ok';
+          } else {
+            res.text = ((document.body && document.body.innerText) || '').replace(/\s+/g, ' ').slice(0, 100);
+          }
+          return JSON.stringify(res);
+        })();
+    """.trimIndent()
+
+    /** Прокрутка списку (контейнер із власною прокруткою або вікно) — підвантажує наступну порцію людей. */
+    val SCROLL_JS = """
+        (function () {
+          var scope = document.querySelector('[role="dialog"]') || document.body;
+          var best = null, bestH = 0, els = scope.querySelectorAll('div');
+          for (var i = 0; i < els.length; i++) {
+            var e = els[i];
+            if (e.scrollHeight <= e.clientHeight + 20) continue;
+            var oy = getComputedStyle(e).overflowY;
+            if ((oy === 'auto' || oy === 'scroll') && e.scrollHeight > bestH) { best = e; bestH = e.scrollHeight; }
+          }
+          if (best) best.scrollTop = best.scrollHeight;
+          window.scrollTo(0, document.documentElement.scrollHeight || document.body.scrollHeight);
+          return best ? 'container' : 'window';
+        })();
+    """.trimIndent()
 }

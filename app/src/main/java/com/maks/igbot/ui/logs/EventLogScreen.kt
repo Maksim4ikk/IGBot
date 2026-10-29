@@ -49,7 +49,7 @@ import com.maks.igbot.ui.theme.AppSuccess
 import com.maks.igbot.ui.theme.AppWarning
 
 private enum class LogFilter(val label: String) {
-    ALL("Усі"), LIKES("Лайки"), PARSER("Парсер"), PROBLEMS("Проблеми")
+    ALL("Усі"), LIKES("Лайки"), PARSER("Парсер"), PROBLEMS("Збої")
 }
 
 private fun LogEntry.matches(filter: LogFilter): Boolean = when (filter) {
