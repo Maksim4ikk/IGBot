@@ -141,8 +141,26 @@ object WebBridge {
         if (!USERNAME_RE.matches(uname)) return result("error", "невірний нікнейм: $uname")
         val wv = WebSession.open("${WebSession.BASE}/${Uri.encode(uname)}/", ua, cookiesJson)
             ?: return result("timeout", "профіль не завантажився за 30 с")
-        val st = WebSession.poll(wv, WebScripts.PROFILE_JS, 14) { it.optString("status", "wait") != "wait" }
+        var st = JSONObject()
+        for (i in 1..16) {
+            delay(1000)
+            st = WebSession.evalJson(wv, WebScripts.PROFILE_JS)
+            if (st.optString("status", "wait") != "wait") break
+            // сітка постів іноді рендериться лише після прокрутки — трохи «штовхаємо» сторінку
+            if (i == 4 || i == 8 || i == 12) {
+                WebSession.evalJs(wv, "window.scrollTo(0, " + (if (i == 8) "0" else "700") + "); 'ok'")
+            }
+        }
         val status = st.optString("status", "wait").let { if (it == "wait") "unknown" else it }
+        if (status == "unknown") {
+            // для діагностики: що під заголовком профілю та які кнопки є внизу сторінки
+            val btns = WebSession.evalJson(wv, WebScripts.TAIL_JS).optString("tail")
+            return result(
+                status,
+                "path=${st.optString("path")} tail=${st.optString("tail")} ${st.optString("diag")} btns=$btns",
+                "codes" to ""
+            )
+        }
         return result(status, pageDetail(st), "codes" to st.optString("codes"))
     }
 
@@ -230,13 +248,15 @@ object WebBridge {
                 stagnant++
             }
             // список перестав зростати (кінець або сторінка не підвантажує) — зупиняємось
-            if (bestCount >= want || stagnant >= (if (bestCount == 0) 8 else 5)) break
+            if (bestCount >= want || stagnant >= 8) break
             WebSession.evalJs(wv, WebScripts.SCROLL_JS)
         }
         if (st.optString("status") == "login") return result("login", st.optString("title"))
+        // якщо список закінчився раніше за потрібне — додаємо підписи нижніх кнопок для діагностики
+        val tail = if (bestCount < want) WebSession.evalJson(wv, WebScripts.TAIL_JS).optString("tail") else ""
         return result(
             if (best.isNotBlank()) "ok" else "unknown",
-            pageDetail(st) + " rounds=$rounds found=$bestCount",
+            pageDetail(st) + " rounds=$rounds found=$bestCount" + (if (tail.isNotEmpty()) " tail=$tail" else ""),
             "names" to best
         )
     }

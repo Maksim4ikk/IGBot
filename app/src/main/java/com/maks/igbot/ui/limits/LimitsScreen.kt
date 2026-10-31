@@ -143,7 +143,7 @@ fun LimitsScreen(context: Context) {
                 NumField(breakMinutesMin, { breakMinutesMin = it }, "Перерва від (хв)", Modifier.weight(1f), decimal = true)
                 NumField(breakMinutesMax, { breakMinutesMax = it }, "до (хв)", Modifier.weight(1f), decimal = true)
             }
-            InfoNote("Повільніший збір безпечніший для технічного акаунта. Зміни діють з наступного запуску парсера.")
+            InfoNote("Повільніший збір безпечніший для технічного акаунта. Якщо в журналі часто з’являється «unknown», збільште паузу до 12–25 с. Зміни діють з наступного запуску парсера.")
         }
 
         Button(

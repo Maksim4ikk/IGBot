@@ -37,6 +37,8 @@ def _safe_pk(code: str) -> int:
 
 class ScraperBot(BaseBot):
     delay_override = [3.0, 6.0]
+    _comments_api_dead = False  # API коментарів віддає HTML — далі одразу читаємо сторінки у WebView
+    _extra_pause = 0.0          # додаткова пауза (с): росте після збоїв читання сторінок, зменшується після успіхів
 
     def __init__(self, cfg: Settings, db: Database):
         super().__init__(
@@ -49,6 +51,7 @@ class ScraperBot(BaseBot):
         )
         self.stop_re = build_stop_regex(self.cfg.stop_words)
         self.preset_medias: dict[int, MediaItem] = {}  # хештег: пост відомий заздалегідь
+        self._comments_api_dead = False
 
     # ── точка входу ─────────────────────────────────────────────────
     def scrape(self, source_type: str, target: str, amount: int = 0) -> None:
@@ -186,18 +189,22 @@ class ScraperBot(BaseBot):
         """Коментатори одного поста: спершу API (зі сторінками), а якщо він нічого не віддав — сторінка
         коментарів у WebView."""
         users: list[UserShort] = []
-        try:
-            users = list(self.api(self.cl.media_commenters, shortcode_to_pk(code), want))
-        except (ApiError, UserNotFound) as e:
-            log.warning("[Парсер] API не віддав коментаторів (%s): %s", code, e)
+        if not self._comments_api_dead:
+            try:
+                users = list(self.api(self.cl.media_commenters, shortcode_to_pk(code), want))
+            except (ApiError, UserNotFound) as e:
+                self._comments_api_dead = True
+                log.info("[Парсер] API коментарів недоступний (%s) — читаю сторінки коментарів у WebView", str(e)[:80])
         if users:
             return users
-        log.info("[Парсер] Читаю коментарі у WebView...")
+        log.info("[Парсер] Читаю коментарі у WebView (до %d людей)...", want)
         res = self.web.post_commenters(code, want)
         names = res.list("names")
         if not names:
-            log.warning("[Парсер] Коментаторів у WebView не знайдено: %s (%s)", res.status, res.detail[:120])
+            log.warning("[Парсер] Коментаторів у WebView не знайдено: %s (%s)", res.status, res.detail[:160])
             return []
+        if len(names) < want:  # допомагає зрозуміти, чому список закінчився
+            log.info("[Парсер] WebView: знайдено %d із %d. Деталі: %s", len(names), want, res.detail[:200])
         # ID зі сторінки невідомий, приватність теж — з'ясується на сторінці профілю
         return [UserShort(pk=pseudo_user_id(n), username=n, full_name="", is_private=None) for n in names]
 
@@ -216,6 +223,8 @@ class ScraperBot(BaseBot):
             # ID зі списку невідомий, приватність теж — це з'ясується на сторінці профілю
             extra.append(UserShort(pk=pseudo_user_id(n), username=n, full_name="", is_private=None))
         log.info("[Парсер] У WebView знайдено лайкерів: %d (додатково до API: %d)", len(names), len(extra))
+        if len(names) < amount:
+            log.info("[Парсер] Деталі списку: %s", res.detail[:200])
         return extra
 
     def _scrape_followers(self, uname: str, amount: int) -> None:
@@ -303,6 +312,9 @@ class ScraperBot(BaseBot):
         if self.stop_event.is_set():
             raise StopWork("Зупинено користувачем")
         res = self.web.latest_posts(uname)
+        if res.status == "unknown":  # сторінка не встигла показати пости — одна повторна спроба з перезавантаженням
+            human_pause(6 + self._extra_pause, 12 + self._extra_pause, self.stop_event)
+            res = self.web.latest_posts(uname)
         if res.ok:
             code = freshest_code(res.list("codes"))
             if not code:
@@ -314,7 +326,7 @@ class ScraperBot(BaseBot):
             return uname, "skipped_private", None
         if res.status in ("no_posts", "not_found"):
             return uname, "skipped_dead", None
-        raise ApiError(f"WebView: {res.status} {res.detail[:160]}")
+        raise ApiError(f"WebView: {res.status} {res.detail[:300]}")
 
     def _next_break(self) -> int:
         return random.randint(self.cfg.scrape_break_every_min, self.cfg.scrape_break_every_max)
@@ -327,6 +339,7 @@ class ScraperBot(BaseBot):
         counter = Counter()
         since_break = 0
         fail_streak = 0
+        self._extra_pause = 0.0
         next_break = self._next_break()
 
         try:
@@ -352,6 +365,7 @@ class ScraperBot(BaseBot):
                 try:
                     name, status, media = self._evaluate(uid, uname)
                     fail_streak = 0
+                    self._extra_pause = max(0.0, self._extra_pause - 5.0)  # усе гаразд — поступово повертаємось до звичайної паузи
                 except UserNotFound as e:
                     log.warning("[Парсер] [%d/%d] @%s недоступний (%s)", i, len(new), uname, e)
                     self.db.add_target(uid, uname, "skipped_dead", source)
@@ -365,7 +379,10 @@ class ScraperBot(BaseBot):
                     log.error("[Парсер] [%d/%d] @%s помилка: %s", i, len(new), uname, e)
                     if fail_streak >= 5:
                         raise StopWork("5 помилок поспіль — зупиняю парсер.")
-                    human_pause(4, 8, self.stop_event)
+                    # Instagram, схоже, обмежує швидкість — автоматично збільшуємо паузу
+                    self._extra_pause = min(90.0, max(15.0, self._extra_pause * 2))
+                    log.info("[Парсер] Сторінки не читаються — збільшую паузу між анкетами на %d с", int(self._extra_pause))
+                    human_pause(4 + self._extra_pause, 8 + self._extra_pause, self.stop_event)
                     continue
 
                 self.db.add_target(uid, name, status, source,
@@ -384,7 +401,8 @@ class ScraperBot(BaseBot):
                     since_break = 0
                     next_break = self._next_break()
                 else:
-                    human_pause(self.cfg.scrape_delay_min, self.cfg.scrape_delay_max, self.stop_event)
+                    human_pause(self.cfg.scrape_delay_min + self._extra_pause,
+                                self.cfg.scrape_delay_max + self._extra_pause, self.stop_event)
         finally:
             self.save_session()
             log.info(

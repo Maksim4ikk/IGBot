@@ -119,6 +119,19 @@ internal object WebScripts {
                           'ainda não há publicações', 'henüz gönderi yok', 'brak postów'])) {
             res.status = 'no_posts';
           }
+          if (res.status === 'wait') {
+            // постів немає, а чому — невідомо: віддаємо діагностику (що під заголовком профілю і чи є дані в коді сторінки)
+            var mainEl = document.querySelector('main') || document.body;
+            var mt = ((mainEl && mainEl.innerText) || '').replace(/\s+/g, ' ');
+            res.tail = mt.slice(Math.max(0, mt.length - 140));
+            try {
+              var h = document.documentElement.innerHTML;
+              var tk = h.match(/"taken_at":\d{9,11}/g);
+              res.diag = 'html=' + h.length + ' taken_at=' + (tk ? tk.length : 0);
+            } catch (e) {
+              res.diag = 'html=?';
+            }
+          }
           return JSON.stringify(res);
         })();
     """.trimIndent()
@@ -270,10 +283,27 @@ internal object WebScripts {
         })();
     """.trimIndent()
 
-    /** Прокрутка списку (контейнер із власною прокруткою або вікно) — підвантажує наступну порцію людей. */
+    /**
+     * Прокрутка списку (контейнер із власною прокруткою або вікно) — підвантажує наступну порцію людей.
+     * Якщо внизу є кнопка «завантажити більше / переглянути відповіді» (за підписом), натискає її.
+     * Кнопки «подобається» та інші кнопки з іконкою НЕ чіпає.
+     */
     val SCROLL_JS = """
         (function () {
           var scope = document.querySelector('[role="dialog"]') || document.body;
+          var MORE = /load more|more comments|view more|view replies|більше коментар|додатков\w* коментар|завантажити ще|переглянути відповіді|больше комментар|ещё комментар|еще комментар|загрузить ещё|więcej komentarz|mehr kommentare|más comentarios|plus de commentaires|altri commenti|mais comentários/i;
+          var clicked = 0;
+          var btns = scope.querySelectorAll('button, [role="button"]');
+          for (var j = 0; j < btns.length && clicked < 3; j++) {
+            var el = btns[j];
+            var svg = el.querySelector('svg[aria-label]');
+            var label = (svg && svg.getAttribute('aria-label')) || el.getAttribute('aria-label') || '';
+            var txt = (el.innerText || '').trim();
+            if ((label && MORE.test(label)) || (txt && txt.length < 40 && MORE.test(txt))) {
+              el.click();
+              clicked++;
+            }
+          }
           var best = null, bestH = 0, els = scope.querySelectorAll('div');
           for (var i = 0; i < els.length; i++) {
             var e = els[i];
@@ -283,7 +313,21 @@ internal object WebScripts {
           }
           if (best) best.scrollTop = best.scrollHeight;
           window.scrollTo(0, document.documentElement.scrollHeight || document.body.scrollHeight);
-          return best ? 'container' : 'window';
+          return (best ? 'container' : 'window') + (clicked ? '+more' + clicked : '');
+        })();
+    """.trimIndent()
+
+    /** Діагностика: підписи останніх кнопок на сторінці (щоб зрозуміти, чим «підвантажується» список). */
+    val TAIL_JS = """
+        (function () {
+          var out = [];
+          var els = document.querySelectorAll('button, [role="button"]');
+          for (var i = Math.max(0, els.length - 10); i < els.length; i++) {
+            var e = els[i], svg = e.querySelector('svg[aria-label]');
+            var t = (svg && svg.getAttribute('aria-label')) || e.getAttribute('aria-label') || (e.innerText || '').trim();
+            out.push(String(t).slice(0, 30));
+          }
+          return JSON.stringify({tail: out.join('|')});
         })();
     """.trimIndent()
 

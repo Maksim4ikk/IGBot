@@ -69,6 +69,7 @@ class Settings:
     scrape_amount: int = 50           # скільки анкет збирати за один запуск (за замовчуванням)
     scrape_delay_min: float = 8.0     # пауза між анкетами, с
     scrape_delay_max: float = 15.0
+    migrated_delays: bool = False     # службове: старі швидкі паузи 3–6 с піднято до нових (один раз)
     scrape_break_every_min: int = 35
     scrape_break_every_max: int = 50
     scrape_break_minutes_min: float = 2.0
@@ -79,6 +80,7 @@ class Settings:
     def load(cls) -> "Settings":
         s = cls()
         p = state.APP_DIR / "config.json"
+        migrated = False
         if p.exists():
             try:
                 data = json.loads(p.read_text(encoding="utf-8"))
@@ -86,9 +88,23 @@ class Settings:
                 for k, v in data.items():
                     if k in valid:
                         setattr(s, k, v)
+                if not data.get("migrated_delays"):
+                    # Колишні типові паузи 3–6 с надто швидкі: Instagram починає не віддавати пости.
+                    # Піднімаємо до нових типових лише раз; далі вибір користувача поважається.
+                    migrated = True
+                    if float(s.scrape_delay_min) <= 3.0 and float(s.scrape_delay_max) <= 6.0:
+                        s.scrape_delay_min, s.scrape_delay_max = 8.0, 15.0
+                        log.info("Паузу між анкетами парсера піднято з 3–6 до 8–15 с (змінити можна у «Ліміти»)")
+                    s.migrated_delays = True
             except Exception as e:
                 log.error("Помилка config.json: %s", e)
-        return s.sanitize()
+        s.sanitize()
+        if migrated:
+            try:
+                s.save()
+            except Exception as e:
+                log.error("Не вдалося зберегти config.json: %s", e)
+        return s
 
     def sanitize(self) -> "Settings":
         """Виправляє некоректні значення (мін > макс, нуль, сміття), щоб бот не впав посеред роботи."""
