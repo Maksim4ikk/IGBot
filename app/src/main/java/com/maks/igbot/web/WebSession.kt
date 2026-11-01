@@ -96,12 +96,14 @@ internal object WebSession {
             wv.settings.javaScriptEnabled = true
             wv.settings.domStorageEnabled = true
             if (ua.isNotBlank()) wv.settings.userAgentString = ua
-            // Невидимому WebView потрібен розмір вікна, інакше сторінка не підвантажує списки при прокрутці
+            // Невидимому WebView потрібен розмір вікна, інакше сторінка не підвантажує списки при прокрутці.
+            // Вікно високе навмисно: Instagram малює сітку постів лише коли вона потрапляє у видиму область,
+            // а на профілях із довгим описом чи відкритими рекомендаціями вона починається нижче першого екрана.
             wv.measure(
                 View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY),
-                View.MeasureSpec.makeMeasureSpec(2400, View.MeasureSpec.EXACTLY)
+                View.MeasureSpec.makeMeasureSpec(4800, View.MeasureSpec.EXACTLY)
             )
-            wv.layout(0, 0, 1080, 2400)
+            wv.layout(0, 0, 1080, 4800)
             CookieManager.getInstance().setAcceptCookie(true)
             CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
             wv.webViewClient = object : WebViewClient() {

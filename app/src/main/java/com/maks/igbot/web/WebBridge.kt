@@ -146,9 +146,10 @@ object WebBridge {
             delay(1000)
             st = WebSession.evalJson(wv, WebScripts.PROFILE_JS)
             if (st.optString("status", "wait") != "wait") break
-            // сітка постів іноді рендериться лише після прокрутки — трохи «штовхаємо» сторінку
-            if (i == 4 || i == 8 || i == 12) {
-                WebSession.evalJs(wv, "window.scrollTo(0, " + (if (i == 8) "0" else "700") + "); 'ok'")
+            // сітка постів рендериться ліниво (лише коли потрапляє у видиму область) — гортаємо вниз і назад
+            when (i) {
+                3, 7, 11, 15 -> WebSession.evalJs(wv, "window.scrollTo(0, 100000); 'ok'")
+                5, 9, 13 -> WebSession.evalJs(wv, "window.scrollTo(0, 0); 'ok'")
             }
         }
         val status = st.optString("status", "wait").let { if (it == "wait") "unknown" else it }
