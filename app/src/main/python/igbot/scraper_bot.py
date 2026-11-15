@@ -36,6 +36,7 @@ def _safe_pk(code: str) -> int:
 
 
 class ScraperBot(BaseBot):
+    web_task_id = "scraper"
     delay_override = [3.0, 6.0]
     _comments_api_dead = False  # API коментарів віддає HTML — далі одразу читаємо сторінки у WebView
     _extra_pause = 0.0          # додаткова пауза (с): росте після збоїв читання сторінок, зменшується після успіхів

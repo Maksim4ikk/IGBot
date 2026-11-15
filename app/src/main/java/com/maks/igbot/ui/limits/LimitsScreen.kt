@@ -148,34 +148,43 @@ fun LimitsScreen(context: Context) {
 
         Button(
             onClick = {
-                scope.launch(Dispatchers.IO) {
-                    val cfg = BotEngine.getSettingsJson(context)
-                    cfg.put("like_last_post", likeLastPost)
-                    cfg.put("watch_stories", watchStories)
-                    cfg.put("skip_business", skipBusiness)
-                    cfg.put("likes_per_hour", likesPerHour.toIntOrNull() ?: 18)
-                    cfg.put("likes_per_day", likesPerDay.toIntOrNull() ?: 120)
-                    cfg.put("stories_per_hour", storiesPerHour.toIntOrNull() ?: 50)
-                    cfg.put("stories_per_day", storiesPerDay.toIntOrNull() ?: 500)
-                    cfg.put("active_start_hour", (startHour.toIntOrNull() ?: 9).coerceIn(0, 22))
-                    cfg.put("active_end_hour", (endHour.toIntOrNull() ?: 23).coerceIn(1, 24))
+                scope.launch {
+                    try {
+                        withContext(Dispatchers.IO) {
+                            val cfg = BotEngine.getSettingsJson(context)
+                            cfg.put("like_last_post", likeLastPost)
+                            cfg.put("watch_stories", watchStories)
+                            cfg.put("skip_business", skipBusiness)
+                            cfg.put("likes_per_hour", (likesPerHour.toIntOrNull() ?: 18).coerceIn(1, 500))
+                            cfg.put("likes_per_day", (likesPerDay.toIntOrNull() ?: 120).coerceIn(1, 10000))
+                            cfg.put("stories_per_hour", (storiesPerHour.toIntOrNull() ?: 50).coerceIn(1, 1000))
+                            cfg.put("stories_per_day", (storiesPerDay.toIntOrNull() ?: 500).coerceIn(1, 10000))
 
-                    cfg.put("scrape_amount", (scrapeAmount.toIntOrNull() ?: 50).coerceIn(1, 5000))
-                    val dMin = parseNum(scrapeDelayMin, 8.0).coerceAtLeast(1.0)
-                    val dMax = parseNum(scrapeDelayMax, 15.0).coerceAtLeast(dMin)
-                    cfg.put("scrape_delay_min", dMin)
-                    cfg.put("scrape_delay_max", dMax)
-                    val bMin = (breakEveryMin.toIntOrNull() ?: 35).coerceAtLeast(1)
-                    val bMax = (breakEveryMax.toIntOrNull() ?: 50).coerceAtLeast(bMin)
-                    cfg.put("scrape_break_every_min", bMin)
-                    cfg.put("scrape_break_every_max", bMax)
-                    val mMin = parseNum(breakMinutesMin, 2.0).coerceAtLeast(0.0)
-                    val mMax = parseNum(breakMinutesMax, 4.0).coerceAtLeast(mMin)
-                    cfg.put("scrape_break_minutes_min", mMin)
-                    cfg.put("scrape_break_minutes_max", mMax)
-                    BotEngine.saveSettingsJson(context, cfg)
+                            val activeStart = (startHour.toIntOrNull() ?: 9).coerceIn(0, 23)
+                            val activeEnd = (endHour.toIntOrNull() ?: 23).coerceIn(activeStart + 1, 24)
+                            cfg.put("active_start_hour", activeStart)
+                            cfg.put("active_end_hour", activeEnd)
+
+                            cfg.put("scrape_amount", (scrapeAmount.toIntOrNull() ?: 50).coerceIn(1, 5000))
+                            val dMin = parseNum(scrapeDelayMin, 8.0).coerceIn(1.0, 3600.0)
+                            val dMax = parseNum(scrapeDelayMax, 15.0).coerceIn(dMin, 3600.0)
+                            cfg.put("scrape_delay_min", dMin)
+                            cfg.put("scrape_delay_max", dMax)
+                            val bMin = (breakEveryMin.toIntOrNull() ?: 35).coerceIn(1, 1000)
+                            val bMax = (breakEveryMax.toIntOrNull() ?: 50).coerceIn(bMin, 1000)
+                            cfg.put("scrape_break_every_min", bMin)
+                            cfg.put("scrape_break_every_max", bMax)
+                            val mMin = parseNum(breakMinutesMin, 2.0).coerceIn(0.0, 1440.0)
+                            val mMax = parseNum(breakMinutesMax, 4.0).coerceIn(mMin, 1440.0)
+                            cfg.put("scrape_break_minutes_min", mMin)
+                            cfg.put("scrape_break_minutes_max", mMax)
+                            BotEngine.saveSettingsJson(context, cfg)
+                        }
+                        Toast.makeText(context, "Налаштування збережено!", Toast.LENGTH_SHORT).show()
+                    } catch (e: Exception) {
+                        Toast.makeText(context, "Не вдалося зберегти: ${e.message}", Toast.LENGTH_LONG).show()
+                    }
                 }
-                Toast.makeText(context, "Налаштування збережено!", Toast.LENGTH_SHORT).show()
             },
             modifier = Modifier.fillMaxWidth().height(52.dp)
         ) {

@@ -66,7 +66,9 @@ class WebInstaClient:
 
     def dump_settings(self, path: Path) -> None:
         cookies = {c.name: c.value for c in self.session.cookies if c.value}
-        path.write_text(json.dumps({"cookies": cookies}, indent=2), encoding="utf-8")
+        temp = path.with_name(path.name + ".tmp")
+        temp.write_text(json.dumps({"cookies": cookies}, indent=2), encoding="utf-8")
+        temp.replace(path)
 
     def _bootstrap_csrf(self) -> None:
         """Безпечне оновлення csrftoken без втрати поточної сесії."""

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field, fields
 
 from . import state
@@ -78,56 +79,127 @@ class Settings:
 
     @classmethod
     def load(cls) -> "Settings":
-        s = cls()
-        p = state.APP_DIR / "config.json"
-        migrated = False
-        if p.exists():
-            try:
-                data = json.loads(p.read_text(encoding="utf-8"))
-                valid = {f.name for f in fields(cls)}
-                for k, v in data.items():
-                    if k in valid:
-                        setattr(s, k, v)
-                if not data.get("migrated_delays"):
-                    # Колишні типові паузи 3–6 с надто швидкі: Instagram починає не віддавати пости.
-                    # Піднімаємо до нових типових лише раз; далі вибір користувача поважається.
-                    migrated = True
-                    if float(s.scrape_delay_min) <= 3.0 and float(s.scrape_delay_max) <= 6.0:
-                        s.scrape_delay_min, s.scrape_delay_max = 8.0, 15.0
-                        log.info("Паузу між анкетами парсера піднято з 3–6 до 8–15 с (змінити можна у «Ліміти»)")
-                    s.migrated_delays = True
-            except Exception as e:
-                log.error("Помилка config.json: %s", e)
-        s.sanitize()
-        if migrated:
-            try:
-                s.save()
-            except Exception as e:
-                log.error("Не вдалося зберегти config.json: %s", e)
-        return s
+        with state.SETTINGS_LOCK:
+            s = cls()
+            p = state.APP_DIR / "config.json"
+            migrated = False
+            if p.exists():
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                    valid = {f.name for f in fields(cls)}
+                    for k, v in data.items():
+                        if k in valid:
+                            setattr(s, k, v)
+                    if not data.get("migrated_delays"):
+                        # Колишні типові паузи 3–6 с надто швидкі: Instagram починає не віддавати пости.
+                        # Піднімаємо до нових типових лише раз; далі вибір користувача поважається.
+                        migrated = True
+                        if float(s.scrape_delay_min) <= 3.0 and float(s.scrape_delay_max) <= 6.0:
+                            s.scrape_delay_min, s.scrape_delay_max = 8.0, 15.0
+                            log.info("Паузу між анкетами парсера піднято з 3–6 до 8–15 с (змінити можна у «Ліміти»)")
+                        s.migrated_delays = True
+                except Exception as e:
+                    log.error("Помилка config.json: %s", e)
+            s.sanitize()
+            if migrated:
+                try:
+                    s.save()
+                except Exception as e:
+                    log.error("Не вдалося зберегти config.json: %s", e)
+            return s
 
     def sanitize(self) -> "Settings":
-        """Виправляє некоректні значення (мін > макс, нуль, сміття), щоб бот не впав посеред роботи."""
+        """Валідовує конфігурацію з диска та UI, щоб помилкове значення не зупинило воркери."""
         defaults = Settings()
-        try:
-            self.scrape_amount = max(1, int(self.scrape_amount))
-            self.scrape_delay_min = max(0.5, float(self.scrape_delay_min))
-            self.scrape_delay_max = max(self.scrape_delay_min, float(self.scrape_delay_max))
-            self.scrape_break_every_min = max(1, int(self.scrape_break_every_min))
-            self.scrape_break_every_max = max(self.scrape_break_every_min, int(self.scrape_break_every_max))
-            self.scrape_break_minutes_min = max(0.0, float(self.scrape_break_minutes_min))
-            self.scrape_break_minutes_max = max(self.scrape_break_minutes_min, float(self.scrape_break_minutes_max))
-        except (TypeError, ValueError):
-            for name in ("scrape_amount", "scrape_delay_min", "scrape_delay_max", "scrape_break_every_min",
-                         "scrape_break_every_max", "scrape_break_minutes_min", "scrape_break_minutes_max"):
+
+        def bounded_int(name: str, minimum: int, maximum: int) -> None:
+            try:
+                raw = getattr(self, name)
+                if isinstance(raw, bool):
+                    raise ValueError
+                value = int(raw)
+            except (TypeError, ValueError, OverflowError):
+                value = getattr(defaults, name)
+            setattr(self, name, min(maximum, max(minimum, value)))
+
+        def bounded_float(name: str, minimum: float, maximum: float) -> None:
+            try:
+                value = float(getattr(self, name))
+                if not math.isfinite(value):
+                    raise ValueError
+            except (TypeError, ValueError, OverflowError):
+                value = getattr(defaults, name)
+            setattr(self, name, min(maximum, max(minimum, value)))
+
+        for name in ("main_username", "main_password", "main_sessionid", "main_proxy",
+                     "scraper_username", "scraper_password", "scraper_sessionid", "scraper_proxy",
+                     "web_user_agent", "accept_language", "timezone"):
+            if not isinstance(getattr(self, name), str):
                 setattr(self, name, getattr(defaults, name))
+
+        for name in ("watch_stories", "like_last_post", "skip_business", "migrated_delays"):
+            if not isinstance(getattr(self, name), bool):
+                setattr(self, name, getattr(defaults, name))
+
+        if isinstance(self.stop_words, list):
+            self.stop_words = [word.strip()[:100] for word in self.stop_words
+                               if isinstance(word, str) and word.strip()][:200]
+        else:
+            self.stop_words = list(DEFAULT_STOP_WORDS)
+
+        for name, minimum, maximum in (
+            ("likes_per_hour", 1, 500), ("likes_per_day", 1, 10000),
+            ("stories_per_hour", 1, 1000), ("stories_per_day", 1, 10000),
+            ("active_start_hour", 0, 23), ("active_end_hour", 1, 24),
+            ("warmup_days", 0, 365), ("max_stories_per_user", 1, 100),
+            ("break_every_min", 1, 1000), ("break_every_max", 1, 1000),
+            ("max_throttle_streak", 1, 20), ("max_attempts_per_target", 1, 20),
+            ("max_fail_streak", 1, 100), ("stale_processing_minutes", 1, 10080),
+            ("idle_poll_seconds", 5, 3600), ("max_following", 0, 1000000),
+            ("max_followers", 0, 10000000), ("min_followers", 0, 10000000),
+            ("min_posts", 0, 1000000), ("scrape_amount", 1, 5000),
+            ("scrape_break_every_min", 1, 1000), ("scrape_break_every_max", 1, 1000),
+        ):
+            bounded_int(name, minimum, maximum)
+
+        for name, minimum, maximum in (
+            ("request_delay_min", 0.1, 3600.0), ("request_delay_max", 0.1, 3600.0),
+            ("pace_jitter", 0.0, 0.9), ("warmup_start_factor", 0.05, 1.0),
+            ("like_probability", 0.0, 1.0), ("break_minutes_min", 0.0, 1440.0),
+            ("break_minutes_max", 0.0, 1440.0), ("target_delay_min", 0.0, 3600.0),
+            ("target_delay_max", 0.0, 3600.0), ("throttle_base_minutes", 0.1, 1440.0),
+            ("block_cooldown_hours", 0.1, 720.0), ("scrape_delay_min", 0.5, 3600.0),
+            ("scrape_delay_max", 0.5, 3600.0), ("scrape_break_minutes_min", 0.0, 1440.0),
+            ("scrape_break_minutes_max", 0.0, 1440.0),
+        ):
+            bounded_float(name, minimum, maximum)
+
+        for minimum_name, maximum_name in (
+            ("request_delay_min", "request_delay_max"),
+            ("target_delay_min", "target_delay_max"),
+            ("break_minutes_min", "break_minutes_max"),
+            ("scrape_delay_min", "scrape_delay_max"),
+            ("scrape_break_minutes_min", "scrape_break_minutes_max"),
+        ):
+            setattr(self, maximum_name, max(getattr(self, minimum_name), getattr(self, maximum_name)))
+
+        self.break_every_max = max(self.break_every_min, self.break_every_max)
+        self.scrape_break_every_max = max(self.scrape_break_every_min, self.scrape_break_every_max)
+        if self.active_end_hour <= self.active_start_hour:
+            self.active_start_hour = defaults.active_start_hour
+            self.active_end_hour = defaults.active_end_hour
         return self
 
     def save(self) -> None:
-        p = state.APP_DIR / "config.json"
-        p.write_text(
-            json.dumps({f.name: getattr(self, f.name) for f in fields(Settings)},
-                       ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        with state.SETTINGS_LOCK:
+            self.sanitize()
+            p = state.APP_DIR / "config.json"
+            temp = p.with_name(p.name + ".tmp")
+            payload = json.dumps(
+                {f.name: getattr(self, f.name) for f in fields(Settings)},
+                ensure_ascii=False,
+                indent=2,
+            )
+            temp.write_text(payload, encoding="utf-8")
+            temp.replace(p)
 

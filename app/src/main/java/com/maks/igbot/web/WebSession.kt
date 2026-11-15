@@ -22,7 +22,7 @@ import kotlin.coroutines.resume
  * виконання JavaScript. Сторінки відкриваються як у звичайному браузері, тому Instagram не блокує їх
  * так, як запити з Python.
  *
- * Одночасно виконується лише одна задача (mutex) — WebView один, а парсер і воркер не працюють разом.
+ * WebView спільний для двох задач, тому mutex серіалізує їхні переходи й скрипти.
  */
 internal object WebSession {
     const val BASE = "https://www.instagram.com"
@@ -42,15 +42,26 @@ internal object WebSession {
     @Volatile
     private var currentUa = ""
 
-    /** Відкриває сторінку з куками акаунта. null — сторінка не завантажилась за 30 с (або немає context). */
-    suspend fun open(url: String, ua: String, cookiesJson: String): WebView? {
+    /** Opens a page with the requested cookies and can be interrupted by its owning task. */
+    suspend fun open(
+        url: String,
+        ua: String,
+        cookiesJson: String,
+        shouldCancel: () -> Boolean = { false },
+    ): WebView? {
+        if (shouldCancel()) return null
         val ctx = appContext ?: return null
         syncCookies(cookiesJson)
+        if (shouldCancel()) return null
         val wv = ensureWebView(ctx, ua)
+        if (shouldCancel()) return null
         pageLoaded = CompletableDeferred()
         withContext(Dispatchers.Main) { wv.loadUrl(url) }
-        val loaded = withTimeoutOrNull(PAGE_TIMEOUT_MS) { pageLoaded.await() }
-        return if (loaded == null) null else wv
+        val loaded = withTimeoutOrNull(PAGE_TIMEOUT_MS) {
+            while (!pageLoaded.isCompleted && !shouldCancel()) delay(100)
+            pageLoaded.isCompleted
+        }
+        return if (loaded == true && !shouldCancel()) wv else null
     }
 
     /** Виконує JavaScript і повертає результат як JSON-текст (рядок у лапках, число, null...). */
@@ -70,13 +81,21 @@ internal object WebSession {
         return JSONObject(s)
     }
 
-    /** Раз на секунду виконує скрипт, доки stop(...) не поверне true або не вийде кількість спроб. */
-    suspend fun poll(wv: WebView, script: String, tries: Int, stop: (JSONObject) -> Boolean): JSONObject {
+    /** Polls a page script until it matches the stop condition, times out, or its owner is cancelled. */
+    suspend fun poll(
+        wv: WebView,
+        script: String,
+        tries: Int,
+        stop: (JSONObject) -> Boolean,
+        shouldCancel: () -> Boolean = { false },
+    ): JSONObject {
         var st = JSONObject()
         for (i in 1..tries) {
+            if (shouldCancel()) break
             delay(1000)
+            if (shouldCancel()) break
             st = evalJson(wv, script)
-            if (stop(st)) break
+            if (shouldCancel() || stop(st)) break
         }
         return st
     }
@@ -95,6 +114,16 @@ internal object WebSession {
             val wv = WebView(ctx.applicationContext)
             wv.settings.javaScriptEnabled = true
             wv.settings.domStorageEnabled = true
+            wv.settings.allowFileAccess = false
+            wv.settings.allowContentAccess = false
+            @Suppress("DEPRECATION")
+            run {
+                wv.settings.allowFileAccessFromFileURLs = false
+                wv.settings.allowUniversalAccessFromFileURLs = false
+            }
+            wv.settings.javaScriptCanOpenWindowsAutomatically = false
+            wv.settings.setSupportMultipleWindows(false)
+            wv.settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW
             if (ua.isNotBlank()) wv.settings.userAgentString = ua
             // Невидимому WebView потрібен розмір вікна, інакше сторінка не підвантажує списки при прокрутці.
             // Вікно високе навмисно: Instagram малює сітку постів лише коли вона потрапляє у видиму область,
@@ -107,6 +136,16 @@ internal object WebSession {
             CookieManager.getInstance().setAcceptCookie(true)
             CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true)
             wv.webViewClient = object : WebViewClient() {
+                override fun shouldOverrideUrlLoading(
+                    view: WebView?,
+                    request: android.webkit.WebResourceRequest
+                ): Boolean {
+                    val uri = request.url
+                    val host = uri.host.orEmpty().lowercase()
+                    return uri.scheme != "https" ||
+                        (host != "instagram.com" && !host.endsWith(".instagram.com"))
+                }
+
                 override fun onPageFinished(view: WebView?, url: String?) {
                     pageLoaded.complete(Unit)
                 }

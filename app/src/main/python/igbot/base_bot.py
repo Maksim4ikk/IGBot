@@ -1,5 +1,6 @@
 """Спільна основа ботів: сесія, вхід, обробка лімітів/блоків Instagram (api())."""
 from __future__ import annotations
+import re
 import threading, time
 from typing import Callable, Optional
 from urllib.parse import unquote
@@ -19,6 +20,7 @@ from .webbridge import WebBridge
 class BaseBot:
     delay_override: Optional[list] = None
     verify_session_on_start = False
+    web_task_id = "worker"
 
     def __init__(self, cfg: Settings, db: Database, username: str, password: str,
                  stop_event: threading.Event, proxy: str = "", sessionid: str = ""):
@@ -29,6 +31,8 @@ class BaseBot:
         self.stop_event = stop_event
         if not self.username:
             raise StopWork("Вкажіть логін акаунта у вкладці 'Акаунти'!")
+        if not re.fullmatch(r"[A-Za-z0-9._]{1,30}", self.username):
+            raise StopWork("Некоректний нікнейм акаунта. Перепідключіть акаунт у вкладці «Акаунти».")
         self.session_path = state.APP_DIR / "sessions" / f"{self.username}.json"
         try:
             self.throttle_streak = int(db.get_meta(f"rate_limit_streak:{self.username}") or "0")
@@ -41,7 +45,7 @@ class BaseBot:
     @property
     def web(self) -> WebBridge:
         """Дії через WebView від імені цього акаунта (куки беруться з поточної сесії)."""
-        return WebBridge(self.cl.session.cookies, self.cfg.web_user_agent)
+        return WebBridge(self.cl.session.cookies, self.cfg.web_user_agent, self.web_task_id)
 
     def _new_client(self) -> WebInstaClient:
         cl = WebInstaClient(self.cfg.web_user_agent, self.cfg.accept_language)

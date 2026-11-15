@@ -74,19 +74,27 @@ fun AccountsScreen(context: Context) {
 
     fun startLogin(kind: String) {
         scope.launch {
-            withContext(Dispatchers.IO) { saveProxies() }
-            loginLauncher.launch(
-                Intent(context, InstagramLoginActivity::class.java)
-                    .putExtra(InstagramLoginActivity.EXTRA_KIND, kind)
-            )
+            try {
+                withContext(Dispatchers.IO) { saveProxies() }
+                loginLauncher.launch(
+                    Intent(context, InstagramLoginActivity::class.java)
+                        .putExtra(InstagramLoginActivity.EXTRA_KIND, kind)
+                )
+            } catch (e: Exception) {
+                Toast.makeText(context, "Не вдалося зберегти проксі: ${e.message}", Toast.LENGTH_LONG).show()
+            }
         }
     }
 
     fun logout(kind: String) {
         scope.launch {
-            withContext(Dispatchers.IO) { BotEngine.logoutAccount(context, kind) }
-            loadAccounts()
-            Toast.makeText(context, "Вихід виконано", Toast.LENGTH_SHORT).show()
+            try {
+                withContext(Dispatchers.IO) { BotEngine.logoutAccount(context, kind) }
+                loadAccounts()
+                Toast.makeText(context, "Вихід виконано", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Toast.makeText(context, "Не вдалося вийти: ${e.message}", Toast.LENGTH_LONG).show()
+            }
         }
     }
 
@@ -120,8 +128,14 @@ fun AccountsScreen(context: Context) {
 
         OutlinedButton(
             onClick = {
-                scope.launch(Dispatchers.IO) { saveProxies() }
-                Toast.makeText(context, "Проксі збережено!", Toast.LENGTH_SHORT).show()
+                scope.launch {
+                    try {
+                        withContext(Dispatchers.IO) { saveProxies() }
+                        Toast.makeText(context, "Проксі збережено!", Toast.LENGTH_SHORT).show()
+                    } catch (e: Exception) {
+                        Toast.makeText(context, "Не вдалося зберегти проксі: ${e.message}", Toast.LENGTH_LONG).show()
+                    }
+                }
             },
             modifier = Modifier.fillMaxWidth().height(48.dp)
         ) {

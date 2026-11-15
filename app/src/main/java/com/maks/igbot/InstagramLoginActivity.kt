@@ -118,7 +118,8 @@ class UsernameBridge {
 
     @JavascriptInterface
     fun onResult(value: String) {
-        pending?.complete(value)
+        val username = value.trim().removePrefix("@")
+        pending?.complete(if (USERNAME_RE.matches(username)) username else "")
     }
 }
 
@@ -152,25 +153,29 @@ private suspend fun fetchUsernameInWebView(webView: WebView, bridge: UsernameBri
 
     val deferred = CompletableDeferred<String>()
     bridge.pending = deferred
-    withContext(Dispatchers.Main) {
-        val js = """
-            (function() {
-              function get(url, pick) {
-                return fetch(url, {credentials: 'include',
-                                   headers: {'X-IG-App-ID': '936619743392459', 'X-Requested-With': 'XMLHttpRequest'}})
-                  .then(function(r) { return r.ok ? r.json() : null; })
-                  .then(function(d) { try { return (d && pick(d)) || ''; } catch (e) { return ''; } })
-                  .catch(function() { return ''; });
-              }
-              get('/api/v1/accounts/edit/web_form_data/', function(d) { return d.form_data.username; })
-                .then(function(u) { return u || get('/api/v1/accounts/current_user/?edit=true', function(d) { return d.user.username; }); })
-                .then(function(u) { return u || get('/api/v1/users/$safeUid/info/', function(d) { return d.user.username; }); })
-                .then(function(u) { AndroidBridge.onResult(u || ''); });
-            })();
-        """.trimIndent()
-        webView.evaluateJavascript(js, null)
+    return try {
+        withContext(Dispatchers.Main) {
+            val js = """
+                (function() {
+                  function get(url, pick) {
+                    return fetch(url, {credentials: 'include',
+                                       headers: {'X-IG-App-ID': '936619743392459', 'X-Requested-With': 'XMLHttpRequest'}})
+                      .then(function(r) { return r.ok ? r.json() : null; })
+                      .then(function(d) { try { return (d && pick(d)) || ''; } catch (e) { return ''; } })
+                      .catch(function() { return ''; });
+                  }
+                  get('/api/v1/accounts/edit/web_form_data/', function(d) { return d.form_data.username; })
+                    .then(function(u) { return u || get('/api/v1/accounts/current_user/?edit=true', function(d) { return d.user.username; }); })
+                    .then(function(u) { return u || get('/api/v1/users/$safeUid/info/', function(d) { return d.user.username; }); })
+                    .then(function(u) { AndroidBridge.onResult(u || ''); });
+                })();
+            """.trimIndent()
+            webView.evaluateJavascript(js, null)
+        }
+        withTimeoutOrNull(25000) { deferred.await() }.orEmpty()
+    } finally {
+        if (bridge.pending === deferred) bridge.pending = null
     }
-    return withTimeoutOrNull(25000) { deferred.await() }.orEmpty()
 }
 
 /** Якщо API не віддало нікнейм (429) — читаємо його зі сторінки, як це робить людина. */
@@ -309,11 +314,28 @@ private fun LoginScreen(kind: String, onClose: () -> Unit, onDone: (String) -> U
                                 )
                                 settings.javaScriptEnabled = true
                                 settings.domStorageEnabled = true
+                                settings.allowFileAccess = false
+                                settings.allowContentAccess = false
+                                settings.allowFileAccessFromFileURLs = false
+                                settings.allowUniversalAccessFromFileURLs = false
+                                settings.javaScriptCanOpenWindowsAutomatically = false
+                                settings.setSupportMultipleWindows(false)
+                                settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                                 settings.userAgentString = userAgent
                                 addJavascriptInterface(bridge, "AndroidBridge")
                                 webViewRef = this
                                 CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-                                webViewClient = WebViewClient()
+                                webViewClient = object : WebViewClient() {
+                                    override fun shouldOverrideUrlLoading(
+                                        view: WebView?,
+                                        request: android.webkit.WebResourceRequest
+                                    ): Boolean {
+                                        val uri = request.url
+                                        val host = uri.host.orEmpty().lowercase()
+                                        return uri.scheme != "https" ||
+                                            (host != "instagram.com" && !host.endsWith(".instagram.com"))
+                                    }
+                                }
                                 loadUrl("https://www.instagram.com/accounts/login/")
                             }
                         },

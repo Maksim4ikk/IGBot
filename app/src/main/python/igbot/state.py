@@ -7,6 +7,8 @@ from pathlib import Path
 
 STOP_WORKER = threading.Event()
 STOP_SCRAPER = threading.Event()
+TASK_LOCK = threading.RLock()
+SETTINGS_LOCK = threading.RLock()
 WORKER_RUNNING = False
 SCRAPER_RUNNING = False
 SCRAPER_TASK = ""

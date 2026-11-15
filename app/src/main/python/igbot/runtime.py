@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import logging
+import re
 import time
 from dataclasses import fields
 from pathlib import Path
@@ -13,6 +14,9 @@ from .instagram_client import WebInstaClient
 from .settings import Settings
 from .rate_limiter import RateLimiter
 from .state import log
+from .webbridge import request_cancel
+
+_USERNAME_RE = re.compile(r"[A-Za-z0-9._]{1,30}")
 
 def init_android_env(files_dir: str) -> None:
     state.APP_DIR = Path(files_dir)
@@ -25,20 +29,23 @@ def init_android_env(files_dir: str) -> None:
         root.addHandler(handler)
         logging.getLogger("urllib3").setLevel(logging.WARNING)
     try:
-        db = Database()
-        if db.get_meta("gone_cleaned_v2") is None:
-            cleaned = db.conn.execute("DELETE FROM targets WHERE status='gone'").rowcount
-            db.set_meta("gone_cleaned_v2", "1")
-            if cleaned:
-                log.info("Відновлено %d анкет для повторної перевірки", cleaned)
-    except Exception:
-        pass
+        with Database() as db:
+            if db.get_meta("gone_cleaned_v2") is None:
+                cleaned = db.conn.execute("DELETE FROM targets WHERE status='gone'").rowcount
+                db.set_meta("gone_cleaned_v2", "1")
+                if cleaned:
+                    log.info("Відновлено %d анкет для повторної перевірки", cleaned)
+            removed_actions = db.conn.execute(
+                "DELETE FROM action_log WHERE ts < ?", (time.time() - 7 * 86400,)
+            ).rowcount
+            if removed_actions:
+                log.info("Очищено старих записів дій: %d", removed_actions)
+    except Exception as e:
+        log.warning("Не вдалося перевірити базу даних: %s", e)
     log.info("Ядро запущено. Готовий до роботи!")
 
 def get_dashboard_json() -> str:
     cfg = Settings.load()
-    db = Database()
-    counts = db.dashboard_counts()
     now = time.time()
     acc = cfg.main_username.strip()
 
@@ -46,21 +53,23 @@ def get_dashboard_json() -> str:
     stories_today, stories_day_max, stories_hr, stories_hr_max = 0, cfg.stories_per_day, 0, cfg.stories_per_hour
     warmup = 1.0
 
-    if acc:
-        try:
-            lim = RateLimiter(db, acc, cfg, state.STOP_WORKER)
-            warmup = round(lim.warmup_factor(), 2)
-            likes_today = lim.used_today("like")
-            likes_day_max = lim.per_day("like")
-            likes_hr = db.used_since(acc, "like", now - 3600)
-            likes_hr_max = lim.per_hour("like")
+    with Database() as db:
+        counts = db.dashboard_counts()
+        if acc:
+            try:
+                lim = RateLimiter(db, acc, cfg, state.STOP_WORKER)
+                warmup = round(lim.warmup_factor(), 2)
+                likes_today = lim.used_today("like")
+                likes_day_max = lim.per_day("like")
+                likes_hr = db.used_since(acc, "like", now - 3600)
+                likes_hr_max = lim.per_hour("like")
 
-            stories_today = lim.used_today("story")
-            stories_day_max = lim.per_day("story")
-            stories_hr = db.used_since(acc, "story", now - 3600)
-            stories_hr_max = lim.per_hour("story")
-        except Exception as e:
-            log.error("Помилка лімітера: %s", e)
+                stories_today = lim.used_today("story")
+                stories_day_max = lim.per_day("story")
+                stories_hr = db.used_since(acc, "story", now - 3600)
+                stories_hr_max = lim.per_hour("story")
+            except Exception as e:
+                log.error("Помилка лімітера: %s", e)
 
     payload = {
         "worker_running": state.WORKER_RUNNING,
@@ -95,7 +104,8 @@ def clear_logs() -> None:
 
 def clear_counter(kind: str) -> str:
     """Очистити плитку «Огляду»: ready | interacted | skipped | errors. Повертає {"cleared": N}."""
-    n = Database().clear_counter(kind)
+    with Database() as db:
+        n = db.clear_counter(kind)
     log.info("Очищено «%s»: %d", kind, n)
     return json.dumps({"cleared": n})
 
@@ -108,36 +118,45 @@ def import_targets_json(raw_json: str) -> str:
     items = data.get("items") if isinstance(data, dict) else data
     if not isinstance(items, list):
         raise ValueError("Невірний формат JSON: очікується список items")
-    db = Database()
     now = time.time()
     added = skipped = 0
-    for it in items:
-        try:
-            uid = int(it["user_id"])
-            media_id = str(it["media_id"]).strip()
-            media_code = str(it.get("media_code") or "").strip()
-            username = str(it.get("username") or "").strip()
-            source = str(it.get("source") or "import")
-        except (KeyError, TypeError, ValueError, AttributeError):
-            skipped += 1
-            continue
-        if not media_id:
-            skipped += 1
-            continue
-        cur = db.conn.execute(
-            """INSERT INTO targets
-               (user_id, username, status, latest_media_id, latest_media_code, source, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?)
-               ON CONFLICT(user_id) DO UPDATE SET
-                 status='ready', latest_media_id=excluded.latest_media_id,
-                 latest_media_code=excluded.latest_media_code, attempts=0, last_error=NULL,
-                 updated_at=excluded.updated_at
-               WHERE targets.status IN ('ready','error','gone','skipped_dead','skipped_nothing','skipped_numbers')""",
-            (uid, username, "ready", media_id, media_code, source, now, now))
-        if cur.rowcount == 1:
-            added += 1
-        else:
-            skipped += 1
+    with Database() as db:
+        for it in items:
+            try:
+                uid = int(it["user_id"])
+                media_id = str(it["media_id"]).strip()
+                media_code = str(it.get("media_code") or "").strip()
+                username = str(it.get("username") or "").strip()
+                source = str(it.get("source") or "import")
+            except (KeyError, TypeError, ValueError, AttributeError):
+                skipped += 1
+                continue
+            if (
+                uid == 0
+                or uid < -(2**63)
+                or uid > 2**63 - 1
+                or not media_id
+                or len(media_id) > 64
+                or len(media_code) > 20
+                or len(username) > 30
+                or len(source) > 200
+            ):
+                skipped += 1
+                continue
+            cur = db.conn.execute(
+                """INSERT INTO targets
+                   (user_id, username, status, latest_media_id, latest_media_code, source, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?)
+                   ON CONFLICT(user_id) DO UPDATE SET
+                     status='ready', latest_media_id=excluded.latest_media_id,
+                     latest_media_code=excluded.latest_media_code, attempts=0, last_error=NULL,
+                     updated_at=excluded.updated_at
+                   WHERE targets.status IN ('ready','error','gone','skipped_dead','skipped_nothing','skipped_numbers')""",
+                (uid, username, "ready", media_id, media_code, source, now, now))
+            if cur.rowcount == 1:
+                added += 1
+            else:
+                skipped += 1
     log.info("Імпорт з JSON: додано %d, пропущено %d (з %d)", added, skipped, len(items))
     return json.dumps({"added": added, "skipped": skipped, "total": len(items)}, ensure_ascii=False)
 
@@ -148,27 +167,36 @@ def get_settings_json() -> str:
 
 
 def save_settings_json(raw_json: str) -> None:
-    cfg = Settings.load()
     data = json.loads(raw_json)
-    valid_keys = {f.name for f in fields(Settings)}
-    for k, v in data.items():
-        if k in valid_keys:
-            setattr(cfg, k, v)
-    cfg.save()
+    editable_keys = {
+        "main_proxy", "scraper_proxy",
+        "watch_stories", "like_last_post", "skip_business",
+        "likes_per_hour", "likes_per_day", "stories_per_hour", "stories_per_day",
+        "active_start_hour", "active_end_hour", "scrape_amount",
+        "scrape_delay_min", "scrape_delay_max",
+        "scrape_break_every_min", "scrape_break_every_max",
+        "scrape_break_minutes_min", "scrape_break_minutes_max",
+    }
+    with state.SETTINGS_LOCK:
+        cfg = Settings.load()
+        for key, value in data.items():
+            if key in editable_keys:
+                setattr(cfg, key, value)
+        cfg.save()
     log.info("Налаштування збережено!")
 
 
 def unlock_all() -> None:
-    db = Database()
-    b = db.clear_blocks()
-    s = db.release_stale(0)
-    r = db.retry_errors()
-    g = db.conn.execute("DELETE FROM targets WHERE status='gone'").rowcount
-    log.info("Розблоковано: %d, завислих: %d, помилок: %d, відновлено gone: %d", b, s, r, g)
-    n = db.conn.execute(
-        "DELETE FROM targets WHERE status IN ('skipped_numbers','skipped_dead')"
-    ).rowcount
-    log.info("Видалено %d анкет для повторної перевірки", n)
+    with Database() as db:
+        b = db.clear_blocks()
+        s = db.release_stale(0)
+        r = db.retry_errors()
+        g = db.conn.execute("DELETE FROM targets WHERE status='gone'").rowcount
+        log.info("Розблоковано: %d, завислих: %d, помилок: %d, відновлено gone: %d", b, s, r, g)
+        n = db.conn.execute(
+            "DELETE FROM targets WHERE status IN ('skipped_numbers','skipped_dead')"
+        ).rowcount
+        log.info("Видалено %d анкет для повторної перевірки", n)
 
     # ════════════════════════════════════════════════════════════════════
 # Акаунти: збереження після входу через WebView / вихід
@@ -203,32 +231,39 @@ def register_account(kind: str, cookies_json: str, user_agent: str, username_hin
     cl.session.cookies.set("ds_user_id", uid, domain=".instagram.com")
 
     username = (username_hint or "").strip().lstrip("@")
+    if not _USERNAME_RE.fullmatch(username):
+        username = ""
     full_name = ""
     if not username:
-        # WebView не віддав нікнейм — пробуємо запитом, але 429 більше не фатальний
+        # WebView не віддав коректний нікнейм — пробуємо запитом, але 429 не фатальний
         try:
             info = cl.user_info(int(uid))
-            username, full_name = info.username, info.full_name
+            candidate = (info.username or "").strip().lstrip("@")
+            if _USERNAME_RE.fullmatch(candidate):
+                username, full_name = candidate, info.full_name
         except (PleaseWaitFewMinutes, ApiError, requests.RequestException) as e:
             log.warning("Не вдалося дізнатися нікнейм (%s). Тимчасово: id%s", e, uid)
-            username = f"id{uid}"
+    if not username:
+        username = f"id{uid}"
 
-    old_username = cfg.main_username if kind == "main" else cfg.scraper_username
-    if kind == "main":
-        cfg.main_username = username
-        cfg.main_sessionid = sid
-        cfg.main_password = ""
-    else:
-        cfg.scraper_username = username
-        cfg.scraper_sessionid = sid
-        cfg.scraper_password = ""
-    if user_agent:
-        cfg.web_user_agent = user_agent
-    cfg.save()
+    with state.SETTINGS_LOCK:
+        cfg = Settings.load()
+        old_username = cfg.main_username if kind == "main" else cfg.scraper_username
+        if kind == "main":
+            cfg.main_username = username
+            cfg.main_sessionid = sid
+            cfg.main_password = ""
+        else:
+            cfg.scraper_username = username
+            cfg.scraper_sessionid = sid
+            cfg.scraper_password = ""
+        if user_agent:
+            cfg.web_user_agent = user_agent
+        cfg.save()
 
     sessions = state.APP_DIR / "sessions"
     sessions.mkdir(parents=True, exist_ok=True)
-    if old_username and old_username != username:
+    if old_username and old_username != username and _USERNAME_RE.fullmatch(old_username):
         try:
             (sessions / f"{old_username}.json").unlink()
         except FileNotFoundError:
@@ -241,26 +276,32 @@ def register_account(kind: str, cookies_json: str, user_agent: str, username_hin
 
 def logout_account(kind: str) -> None:
     """Вихід з акаунта: зупиняє відповідний процес, чистить дані та файл сесії."""
-    cfg = Settings.load()
     if kind == "main":
-        uname = cfg.main_username
         state.STOP_WORKER.set()
-        cfg.main_username = ""
-        cfg.main_password = ""
-        cfg.main_sessionid = ""
+        request_cancel("worker")
     elif kind == "scraper":
-        uname = cfg.scraper_username
         state.STOP_SCRAPER.set()
-        cfg.scraper_username = ""
-        cfg.scraper_password = ""
-        cfg.scraper_sessionid = ""
+        request_cancel("scraper")
     else:
         return
 
-    if uname:
+    with state.SETTINGS_LOCK:
+        cfg = Settings.load()
+        if kind == "main":
+            uname = cfg.main_username
+            cfg.main_username = ""
+            cfg.main_password = ""
+            cfg.main_sessionid = ""
+        else:
+            uname = cfg.scraper_username
+            cfg.scraper_username = ""
+            cfg.scraper_password = ""
+            cfg.scraper_sessionid = ""
+        cfg.save()
+
+    if uname and _USERNAME_RE.fullmatch(uname):
         try:
             (state.APP_DIR / "sessions" / f"{uname}.json").unlink()
         except FileNotFoundError:
             pass
-    cfg.save()
     log.info("Вихід з акаунта @%s виконано", uname or "?")

@@ -41,7 +41,6 @@ import com.maks.igbot.ui.components.AppCard
 import com.maks.igbot.ui.components.InfoNote
 import com.maks.igbot.ui.components.ScreenHeader
 import com.maks.igbot.ui.components.SectionTitle
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -78,9 +77,19 @@ fun ScraperScreen(context: Context, scraperRunning: Boolean, scraperTask: String
             importScope.launch {
                 try {
                     val res = withContext(Dispatchers.IO) {
-                        val text = context.contentResolver.openInputStream(uri)
-                            ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }
-                            ?: throw IllegalStateException("Не вдалося прочитати файл")
+                        val text = context.contentResolver.openInputStream(uri)?.use { input ->
+                            val buffer = ByteArray(8192)
+                            val output = java.io.ByteArrayOutputStream()
+                            var totalBytes = 0
+                            while (true) {
+                                val count = input.read(buffer)
+                                if (count < 0) break
+                                totalBytes += count
+                                require(totalBytes <= 8 * 1024 * 1024) { "Файл черги перевищує 8 МБ" }
+                                output.write(buffer, 0, count)
+                            }
+                            String(output.toByteArray(), Charsets.UTF_8)
+                        } ?: throw IllegalStateException("Не вдалося прочитати файл")
                         BotEngine.importTargets(context, text)
                     }
                     Toast.makeText(
@@ -183,7 +192,9 @@ fun ScraperScreen(context: Context, scraperRunning: Boolean, scraperTask: String
 
             if (scraperRunning) {
                 OutlinedButton(
-                    onClick = { CoroutineScope(Dispatchers.IO).launch { BotEngine.stopScraper(context) } },
+                    onClick = {
+                        importScope.launch { withContext(Dispatchers.IO) { BotEngine.stopScraper(context) } }
+                    },
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("Зупинити поточний парсинг", color = MaterialTheme.colorScheme.error)

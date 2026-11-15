@@ -36,9 +36,13 @@ class BotForegroundService : Service() {
     private var wakeLockAcquiredAt = 0L
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val channelId = "igbot_background_channel"
+    private val taskPrefs by lazy {
+        getSharedPreferences("background_tasks", Context.MODE_PRIVATE)
+    }
 
     private companion object {
         const val IDLE_STOP_MS = 2 * 60 * 1000L
+        const val TASK_START_GRACE_MS = 15 * 1000L
         const val TAG = "BotForegroundService"
     }
 
@@ -49,12 +53,10 @@ class BotForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val action = intent?.action ?: "START_WORKER"
-
-        // Переходимо у foreground до запуску Chaquopy/Python: його ініціалізація може бути повільною.
-        startAsForeground()
+        val action = intent?.action ?: if (intent == null) "RESTORE_TASKS" else "START_WORKER"
 
         if (action == "STOP_ALL") {
+            taskPrefs.edit().clear().apply()
             serviceScope.launch {
                 try {
                     BotEngine.ensureInit(this@BotForegroundService)
@@ -70,26 +72,67 @@ class BotForegroundService : Service() {
             return START_NOT_STICKY
         }
 
-        serviceScope.launch {
-            try {
-                BotEngine.ensureInit(this@BotForegroundService)
-                when (action) {
-                    "START_WORKER" -> BotEngine.startWorker(this@BotForegroundService)
-                    "START_SCRAPER" -> {
-                        val sourceType = intent?.getStringExtra("source_type") ?: "followers"
-                        val target = intent?.getStringExtra("target") ?: ""
-                        val amount = intent?.getIntExtra("amount", 0) ?: 0
-                        BotEngine.startScraper(this@BotForegroundService, sourceType, target, amount)
-                    }
-                }
-                startStatusUpdater()
-            } catch (e: Exception) {
-                Log.e(TAG, "Не вдалося запустити задачу: $action", e)
+        when (action) {
+            "START_WORKER" -> taskPrefs.edit()
+                .putBoolean("worker_active", true)
+                .putLong("worker_requested_at", System.currentTimeMillis())
+                .apply()
+            "START_SCRAPER" -> taskPrefs.edit()
+                .putBoolean("scraper_active", true)
+                .putString("scraper_source", intent?.getStringExtra("source_type") ?: "followers")
+                .putString("scraper_target", intent?.getStringExtra("target") ?: "")
+                .putInt("scraper_amount", intent?.getIntExtra("amount", 0) ?: 0)
+                .putLong("scraper_requested_at", System.currentTimeMillis())
+                .apply()
+            "RESTORE_TASKS" -> Unit
+            else -> {
                 stopSelf(startId)
+                return START_NOT_STICKY
             }
         }
 
-        // Android може відновити сервіс після завершення процесу.
+        if (!taskPrefs.getBoolean("worker_active", false) &&
+            !taskPrefs.getBoolean("scraper_active", false)
+        ) {
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+
+        // Переходимо у foreground до запуску Chaquopy/Python: його ініціалізація може бути повільною.
+        startAsForeground()
+
+        serviceScope.launch {
+            try {
+                BotEngine.ensureInit(this@BotForegroundService)
+                if (taskPrefs.getBoolean("worker_active", false)) {
+                    BotEngine.startWorker(this@BotForegroundService)
+                }
+                if (taskPrefs.getBoolean("scraper_active", false)) {
+                    BotEngine.startScraper(
+                        this@BotForegroundService,
+                        taskPrefs.getString("scraper_source", "followers") ?: "followers",
+                        taskPrefs.getString("scraper_target", "") ?: "",
+                        taskPrefs.getInt("scraper_amount", 0)
+                    )
+                }
+                startStatusUpdater()
+            } catch (e: Exception) {
+                Log.e(TAG, "Не вдалося відновити фонові задачі", e)
+                taskPrefs.edit().clear().apply()
+                try {
+                    BotEngine.stopWorker(this@BotForegroundService)
+                    BotEngine.stopScraper(this@BotForegroundService)
+                } catch (stopError: Exception) {
+                    Log.e(TAG, "Не вдалося очистити частково запущені задачі", stopError)
+                }
+                withContext(Dispatchers.Main) {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf(startId)
+                }
+            }
+        }
+
+        // Android може відновити службу з null intent; активні задачі відновлюються з taskPrefs.
         return START_STICKY
     }
 
@@ -106,6 +149,7 @@ class BotForegroundService : Service() {
         }
     }
 
+    @Synchronized
     private fun startStatusUpdater() {
         if (monitorJob?.isActive == true) return
         monitorJob = serviceScope.launch {
@@ -120,8 +164,23 @@ class BotForegroundService : Service() {
                     val ready = dash.optInt("ready", 0)
                     renewWakeLockIfNeeded()
 
+                    val now = System.currentTimeMillis()
+                    val completed = taskPrefs.edit()
+                    val workerRequestedAt = taskPrefs.getLong("worker_requested_at", now)
+                    val scraperRequestedAt = taskPrefs.getLong("scraper_requested_at", now)
+                    if (!workerRunning && now - workerRequestedAt >= TASK_START_GRACE_MS) {
+                        completed.remove("worker_active").remove("worker_requested_at")
+                    }
+                    if (!scraperRunning && now - scraperRequestedAt >= TASK_START_GRACE_MS) {
+                        completed.remove("scraper_active")
+                            .remove("scraper_requested_at")
+                            .remove("scraper_source")
+                            .remove("scraper_target")
+                            .remove("scraper_amount")
+                    }
+                    completed.apply()
+
                     if (!workerRunning && !scraperRunning) {
-                        val now = System.currentTimeMillis()
                         if (idleSince == 0L) idleSince = now
                         if (now - idleSince > IDLE_STOP_MS) {
                             withContext(Dispatchers.Main) {

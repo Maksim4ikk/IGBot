@@ -1,39 +1,66 @@
 from __future__ import annotations
-import sqlite3, time
+
+import sqlite3
+import threading
+import time
 from typing import Optional
+
 from . import state
+
+
+_SCHEMA_LOCK = threading.Lock()
+_SCHEMA_INITIALIZED = False
+_SCHEMA_SQL = """
+    CREATE TABLE IF NOT EXISTS targets (
+        user_id INTEGER PRIMARY KEY,
+        username TEXT,
+        status TEXT NOT NULL,
+        latest_media_id TEXT,
+        latest_media_code TEXT,
+        source TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        created_at REAL NOT NULL,
+        updated_at REAL NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_targets_status ON targets(status, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_targets_username ON targets(username COLLATE NOCASE);
+    CREATE TABLE IF NOT EXISTS action_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        account TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        ts REAL NOT NULL,
+        count INTEGER NOT NULL DEFAULT 1
+    );
+    CREATE INDEX IF NOT EXISTS idx_action ON action_log(account, kind, ts);
+    CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+"""
+
+
 class Database:
     def __init__(self):
+        global _SCHEMA_INITIALIZED
         db_path = str(state.APP_DIR / "igbot.db")
         self.conn = sqlite3.connect(db_path, timeout=30.0, isolation_level=None, check_same_thread=False)
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA synchronous=NORMAL")
-        self.conn.executescript("""
-            CREATE TABLE IF NOT EXISTS targets (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                status TEXT NOT NULL,
-                latest_media_id TEXT,
-                latest_media_code TEXT,
-                source TEXT,
-                attempts INTEGER NOT NULL DEFAULT 0,
-                last_error TEXT,
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_targets_status ON targets(status, updated_at);
-            CREATE INDEX IF NOT EXISTS idx_targets_username ON targets(username COLLATE NOCASE);
-            CREATE TABLE IF NOT EXISTS action_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                account TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                ts REAL NOT NULL,
-                count INTEGER NOT NULL DEFAULT 1
-            );
-            CREATE INDEX IF NOT EXISTS idx_action ON action_log(account, kind, ts);
-            CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
-        """)
-        self.conn.execute("DELETE FROM action_log WHERE ts < ?", (time.time() - 7 * 86400,))
+        try:
+            self.conn.execute("PRAGMA synchronous=NORMAL")
+            with _SCHEMA_LOCK:
+                if not _SCHEMA_INITIALIZED:
+                    self.conn.execute("PRAGMA journal_mode=WAL")
+                    self.conn.executescript(_SCHEMA_SQL)
+                    _SCHEMA_INITIALIZED = True
+        except Exception:
+            self.conn.close()
+            raise
+
+    def close(self) -> None:
+        self.conn.close()
+
+    def __enter__(self) -> "Database":
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
 
     def exists(self, uid: int) -> bool:
         return self.conn.execute("SELECT 1 FROM targets WHERE user_id=?", (uid,)).fetchone() is not None

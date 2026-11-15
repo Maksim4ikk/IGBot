@@ -34,6 +34,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -67,9 +68,9 @@ import com.maks.igbot.ui.theme.BrandAccent
 import com.maks.igbot.ui.theme.BrandPrimaryDark
 import com.maks.igbot.ui.theme.DarkDivider
 import com.maks.igbot.ui.theme.OnDarkMuted
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** Яку плитку збираються очистити (ключі збігаються з Python: ready | interacted | skipped | errors). */
 private data class ClearRequest(val kind: String, val title: String, val text: String, val button: String)
@@ -100,6 +101,7 @@ fun DashboardScreen(
     onClearCounter: (String) -> Unit,
     onUnlock: () -> Unit
 ) {
+    val scope = rememberCoroutineScope()
     var pending by remember { mutableStateOf<ClearRequest?>(null) }
 
     pending?.let { req ->
@@ -154,7 +156,7 @@ fun DashboardScreen(
                             }
                             ContextCompat.startForegroundService(context, intent)
                         } else {
-                            CoroutineScope(Dispatchers.IO).launch { BotEngine.stopWorker(context) }
+                            scope.launch { withContext(Dispatchers.IO) { BotEngine.stopWorker(context) } }
                         }
                     },
                     modifier = Modifier.fillMaxWidth().height(52.dp),
@@ -184,7 +186,9 @@ fun DashboardScreen(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
-                        TextButton(onClick = { CoroutineScope(Dispatchers.IO).launch { BotEngine.stopScraper(context) } }) {
+                        TextButton(onClick = {
+                            scope.launch { withContext(Dispatchers.IO) { BotEngine.stopScraper(context) } }
+                        }) {
                             Text("Зупинити", color = Color(0xFFFF9D91))
                         }
                     }

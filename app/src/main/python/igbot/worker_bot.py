@@ -11,6 +11,8 @@ from .utils import fmt_secs, freshest_code, human_pause, nap, pk_to_shortcode, s
 
 
 class MainWorker(BaseBot):
+    web_task_id = "worker"
+
     def __init__(self, cfg: Settings, db: Database):
         uname = cfg.main_username.strip()
         if uname:

@@ -38,9 +38,10 @@ class WebResult:
 class WebBridge:
     """Обгортка над Kotlin-мостом для одного акаунта (його куки + User-Agent)."""
 
-    def __init__(self, cookie_jar: Iterable, user_agent: str = ""):
+    def __init__(self, cookie_jar: Iterable, user_agent: str = "", task_id: str = "worker"):
         self._jar = cookie_jar
         self._ua = (user_agent or "").strip()
+        self._task_id = task_id
 
     def _cookies_json(self) -> str:
         return json.dumps({c.name: c.value for c in self._jar if c.value})
@@ -51,13 +52,15 @@ class WebBridge:
         except ImportError as e:
             raise StopWork("Ця функція працює лише в Android-застосунку") from e
         try:
-            raw = getattr(jclass(BRIDGE_CLASS), fn)(*args, self._ua, self._cookies_json())
+            raw = getattr(jclass(BRIDGE_CLASS), fn)(*args, self._ua, self._cookies_json(), self._task_id)
         except UnicodeError as e:  # напр. обрізаний посередині емодзі в тексті сторінки
             return WebResult("error", {}, f"некоректний текст від WebView: {e}")
         data = json.loads(str(raw))
         status = str(data.get("status", "error"))
         if status in ("login", "login_required"):
             raise StopWork(LOGIN_HINT)
+        if status == "cancelled":
+            raise StopWork("Зупинено користувачем")
         return WebResult(status, data, str(data.get("detail", "")))
 
     # ── дії ─────────────────────────────────────────────────────────
@@ -91,10 +94,12 @@ class WebBridge:
         return self._call("postCommenters", code, int(amount))
 
 
-def request_cancel() -> None:
-    """Просить Kotlin-міст перервати довгу операцію (прокрутку списку). Поза Android нічого не робить."""
+def request_cancel(task_id: str) -> None:
+    """Cancels the active WebView operation owned by this task."""
+    if task_id not in ("worker", "scraper"):
+        return
     try:
         from java import jclass
-        jclass(BRIDGE_CLASS).cancel()
+        jclass(BRIDGE_CLASS).cancel(task_id)
     except Exception:
         pass

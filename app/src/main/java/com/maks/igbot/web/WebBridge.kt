@@ -7,6 +7,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Єдина точка, яку викликає Python (igbot/webbridge.py): дії на сторінках Instagram через WebView.
@@ -18,13 +20,27 @@ object WebBridge {
     private val USERNAME_RE = Regex("[A-Za-z0-9._]{1,30}")
     private const val MAX_LIST = 5000
 
-    /** Python просить перервати довгу операцію (кнопка «Зупинити»). */
+    /** Cancellation generation is scoped to the worker or scraper, never to the shared WebView. */
+    private val cancellationGenerations = ConcurrentHashMap<String, AtomicLong>()
+
     @Volatile
-    private var cancelled = false
+    private var activeTaskId: String? = null
+
+    @Volatile
+    private var activeTaskGeneration = 0L
+
+    private fun generation(taskId: String): AtomicLong =
+        cancellationGenerations.computeIfAbsent(taskId) { AtomicLong(0L) }
+
+    private val cancelled: Boolean
+        get() {
+            val taskId = activeTaskId ?: return false
+            return generation(taskId).get() != activeTaskGeneration
+        }
 
     @JvmStatic
-    fun cancel() {
-        cancelled = true
+    fun cancel(taskId: String) {
+        if (taskId.isNotBlank()) generation(taskId).incrementAndGet()
     }
 
     fun init(context: Context) {
@@ -33,51 +49,62 @@ object WebBridge {
 
     /** Лайк поста за кодом. liked | already_liked | no_button | not_confirmed | login | timeout | error */
     @JvmStatic
-    fun like(code: String, userAgent: String, cookiesJson: String): String =
-        guarded { doLike(code, userAgent, cookiesJson) }
+    fun like(code: String, userAgent: String, cookiesJson: String, taskId: String): String =
+        guarded(taskId) { doLike(code, userAgent, cookiesJson) }
 
     /** Коди постів зі сторінки профілю. ok(+codes) | private | no_posts | not_found | unknown | login | timeout */
     @JvmStatic
-    fun latestPost(username: String, userAgent: String, cookiesJson: String): String =
-        guarded { doLatestPosts(username, userAgent, cookiesJson) }
+    fun latestPost(username: String, userAgent: String, cookiesJson: String, taskId: String): String =
+        guarded(taskId) { doLatestPosts(username, userAgent, cookiesJson) }
 
     /** ID акаунта за нікнеймом. ok(+id) | not_found | unknown | login | timeout */
     @JvmStatic
-    fun profileId(username: String, userAgent: String, cookiesJson: String): String =
-        guarded { doProfileId(username, userAgent, cookiesJson) }
+    fun profileId(username: String, userAgent: String, cookiesJson: String, taskId: String): String =
+        guarded(taskId) { doProfileId(username, userAgent, cookiesJson) }
 
     /** Пости зі сторінки хештегу (з прокруткою). ok(+codes) | unknown | login | timeout */
     @JvmStatic
-    fun hashtagPosts(tag: String, amount: Int, userAgent: String, cookiesJson: String): String =
-        guarded { doHashtag(tag, amount, userAgent, cookiesJson) }
+    fun hashtagPosts(tag: String, amount: Int, userAgent: String, cookiesJson: String, taskId: String): String =
+        guarded(taskId) { doHashtag(tag, amount, userAgent, cookiesJson) }
 
     /** Автор поста. ok(+username, ids) | unknown | login | timeout */
     @JvmStatic
-    fun postAuthor(code: String, userAgent: String, cookiesJson: String): String =
-        guarded { doPostAuthor(code, userAgent, cookiesJson) }
+    fun postAuthor(code: String, userAgent: String, cookiesJson: String, taskId: String): String =
+        guarded(taskId) { doPostAuthor(code, userAgent, cookiesJson) }
 
     /** Повний список тих, хто лайкнув пост (прокрутка екрана «Вподобання»). ok(+names) | unknown | login | timeout */
     @JvmStatic
-    fun postLikers(code: String, amount: Int, userAgent: String, cookiesJson: String): String =
-        guarded { doPostLikers(code, amount, userAgent, cookiesJson) }
+    fun postLikers(code: String, amount: Int, userAgent: String, cookiesJson: String, taskId: String): String =
+        guarded(taskId) { doPostLikers(code, amount, userAgent, cookiesJson) }
 
     /** Автори коментарів поста (прокрутка сторінки коментарів). ok(+names) | unknown | login | timeout */
     @JvmStatic
-    fun postCommenters(code: String, amount: Int, userAgent: String, cookiesJson: String): String =
-        guarded { doPostCommenters(code, amount, userAgent, cookiesJson) }
+    fun postCommenters(code: String, amount: Int, userAgent: String, cookiesJson: String, taskId: String): String =
+        guarded(taskId) { doPostCommenters(code, amount, userAgent, cookiesJson) }
 
     // ── реалізація ──────────────────────────────────────────────────
-    private fun guarded(block: suspend () -> String): String =
+    private fun guarded(taskId: String, block: suspend () -> String): String =
         try {
+            val taskGeneration = generation(taskId).get()
             runBlocking(Dispatchers.Default) {
                 WebSession.mutex.withLock {
-                    cancelled = false
-                    block()
+                    if (generation(taskId).get() != taskGeneration) {
+                        return@withLock result("cancelled", "Зупинено користувачем")
+                    }
+                    activeTaskId = taskId
+                    activeTaskGeneration = taskGeneration
+                    try {
+                        block()
+                    } finally {
+                        activeTaskId = null
+                    }
                 }
             }
         } catch (e: Exception) {
             result("error", "${e::class.simpleName}: ${e.message}")
         }
+
+    private fun cancelledResult(): String = result("cancelled", "Зупинено користувачем")
 
     private fun result(status: String, detail: String = "", vararg extra: Pair<String, Any?>): String {
         val o = JSONObject().put("status", status).put("detail", clean(detail))
@@ -116,19 +143,22 @@ object WebBridge {
 
     private suspend fun doLike(code: String, ua: String, cookiesJson: String): String {
         if (!CODE_RE.matches(code)) return result("error", "невірний код поста: $code")
-        val wv = WebSession.open("${WebSession.BASE}/p/$code/", ua, cookiesJson)
-            ?: return result("timeout", "сторінка поста не завантажилась за 30 с")
+        val wv = WebSession.open("${WebSession.BASE}/p/$code/", ua, cookiesJson) { cancelled }
+            ?: return if (cancelled) cancelledResult() else result("timeout", "сторінка поста не завантажилась за 30 с")
 
         // чекаємо, поки сторінка "оживе" і з'явиться панель дій під постом
-        var st = WebSession.poll(wv, WebScripts.STATE_JS, 15) { it.optBoolean("login") || it.optBoolean("found") }
+        var st = WebSession.poll(wv, WebScripts.STATE_JS, 15, { it.optBoolean("login") || it.optBoolean("found") }) { cancelled }
+        if (cancelled) return cancelledResult()
         if (st.optBoolean("login")) return result("login", st.optString("title"))
         if (!st.optBoolean("found")) {
             return result("no_button", pageDetail(st) + " labels=${st.optString("labels")}")
         }
         if (st.optBoolean("liked")) return result("already_liked")
 
+        if (cancelled) return cancelledResult()
         WebSession.evalJs(wv, WebScripts.CLICK_JS)
-        st = WebSession.poll(wv, WebScripts.STATE_JS, 6) { it.optBoolean("liked") }
+        st = WebSession.poll(wv, WebScripts.STATE_JS, 6, { it.optBoolean("liked") }) { cancelled }
+        if (cancelled) return cancelledResult()
         return if (st.optBoolean("liked")) {
             result("liked")
         } else {
@@ -139,10 +169,11 @@ object WebBridge {
     private suspend fun doLatestPosts(username: String, ua: String, cookiesJson: String): String {
         val uname = username.trim().trimStart('@')
         if (!USERNAME_RE.matches(uname)) return result("error", "невірний нікнейм: $uname")
-        val wv = WebSession.open("${WebSession.BASE}/${Uri.encode(uname)}/", ua, cookiesJson)
-            ?: return result("timeout", "профіль не завантажився за 30 с")
+        val wv = WebSession.open("${WebSession.BASE}/${Uri.encode(uname)}/", ua, cookiesJson) { cancelled }
+            ?: return if (cancelled) cancelledResult() else result("timeout", "профіль не завантажився за 30 с")
         var st = JSONObject()
         for (i in 1..30) {
+            if (cancelled) return cancelledResult()
             delay(1000)
             st = WebSession.evalJson(wv, WebScripts.PROFILE_JS)
             if (st.optString("status", "wait") != "wait") break
@@ -154,6 +185,7 @@ object WebBridge {
                     WebSession.evalJs(wv, "window.scrollTo(0, 0); 'ok'")
             }
         }
+        if (cancelled) return cancelledResult()
         val status = st.optString("status", "wait").let { if (it == "wait") "unknown" else it }
         if (status == "unknown") {
             // для діагностики: що під заголовком профілю та які кнопки є внизу сторінки
@@ -170,10 +202,11 @@ object WebBridge {
     private suspend fun doProfileId(username: String, ua: String, cookiesJson: String): String {
         val uname = username.trim().trimStart('@')
         if (!USERNAME_RE.matches(uname)) return result("error", "невірний нікнейм: $uname")
-        val wv = WebSession.open("${WebSession.BASE}/${Uri.encode(uname)}/", ua, cookiesJson)
-            ?: return result("timeout", "сторінка профілю не завантажилась за 30 с")
+        val wv = WebSession.open("${WebSession.BASE}/${Uri.encode(uname)}/", ua, cookiesJson) { cancelled }
+            ?: return if (cancelled) cancelledResult() else result("timeout", "сторінка профілю не завантажилась за 30 с")
         val js = WebScripts.PROFILE_ID_JS.replace("__UNAME__", JSONObject.quote(uname))
-        val st = WebSession.poll(wv, js, 14) { it.optString("status", "wait") != "wait" }
+        val st = WebSession.poll(wv, js, 14, { it.optString("status", "wait") != "wait" }) { cancelled }
+        if (cancelled) return cancelledResult()
         val status = st.optString("status", "wait").let { if (it == "wait") "unknown" else it }
         return result(status, pageDetail(st), "id" to st.optString("id"))
     }
@@ -183,8 +216,8 @@ object WebBridge {
         if (t.isEmpty() || t.length > 100 || t.any { it.isWhitespace() || it == '/' || it == '?' || it == '#' }) {
             return result("error", "невірний хештег: $tag")
         }
-        val wv = WebSession.open("${WebSession.BASE}/explore/tags/${Uri.encode(t)}/", ua, cookiesJson)
-            ?: return result("timeout", "сторінка хештегу не завантажилась за 30 с")
+        val wv = WebSession.open("${WebSession.BASE}/explore/tags/${Uri.encode(t)}/", ua, cookiesJson) { cancelled }
+            ?: return if (cancelled) cancelledResult() else result("timeout", "сторінка хештегу не завантажилась за 30 с")
 
         val want = amount.coerceIn(1, 1000)
         var st = JSONObject()
@@ -207,6 +240,7 @@ object WebBridge {
             if (bestCount >= want || stagnant >= 3) break
             WebSession.evalJs(wv, "window.scrollTo(0, document.body.scrollHeight); 'ok'")
         }
+        if (cancelled) return cancelledResult()
         if (st.optString("status") == "login") return result("login", st.optString("title"))
         return result(if (best.isNotBlank()) "ok" else "unknown", pageDetail(st), "codes" to best)
     }
@@ -228,8 +262,8 @@ object WebBridge {
     private suspend fun scrollCollect(
         url: String, script: String, amount: Int, ua: String, cookiesJson: String, what: String
     ): String {
-        val wv = WebSession.open(url, ua, cookiesJson)
-            ?: return result("timeout", "сторінка «$what» не завантажилась за 30 с")
+        val wv = WebSession.open(url, ua, cookiesJson) { cancelled }
+            ?: return if (cancelled) cancelledResult() else result("timeout", "сторінка «$what» не завантажилась за 30 с")
 
         val want = amount.coerceIn(1, MAX_LIST)
         var st = JSONObject()
@@ -254,6 +288,7 @@ object WebBridge {
             if (bestCount >= want || stagnant >= 8) break
             WebSession.evalJs(wv, WebScripts.SCROLL_JS)
         }
+        if (cancelled) return cancelledResult()
         if (st.optString("status") == "login") return result("login", st.optString("title"))
         // якщо список закінчився раніше за потрібне — додаємо підписи нижніх кнопок для діагностики
         val tail = if (bestCount < want) WebSession.evalJson(wv, WebScripts.TAIL_JS).optString("tail") else ""
@@ -266,9 +301,10 @@ object WebBridge {
 
     private suspend fun doPostAuthor(code: String, ua: String, cookiesJson: String): String {
         if (!CODE_RE.matches(code)) return result("error", "невірний код поста: $code")
-        val wv = WebSession.open("${WebSession.BASE}/p/$code/", ua, cookiesJson)
-            ?: return result("timeout", "сторінка поста не завантажилась за 30 с")
-        val st = WebSession.poll(wv, WebScripts.POST_AUTHOR_JS, 12) { it.optString("status", "wait") != "wait" }
+        val wv = WebSession.open("${WebSession.BASE}/p/$code/", ua, cookiesJson) { cancelled }
+            ?: return if (cancelled) cancelledResult() else result("timeout", "сторінка поста не завантажилась за 30 с")
+        val st = WebSession.poll(wv, WebScripts.POST_AUTHOR_JS, 12, { it.optString("status", "wait") != "wait" }) { cancelled }
+        if (cancelled) return cancelledResult()
         val status = st.optString("status", "wait").let { if (it == "wait") "unknown" else it }
         return result(status, pageDetail(st), "username" to st.optString("username"), "ids" to st.optString("ids"))
     }

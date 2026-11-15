@@ -42,7 +42,7 @@ android {
     chaquopy {
         defaultConfig {
             version = "3.12"
-            buildPython("C:/Users/maksi/AppData/Local/Programs/Python/Python312/python.exe")
+            providers.gradleProperty("chaquopyPython").orNull?.let { buildPython(it) }
             pip {
                 install("requests")
             }
