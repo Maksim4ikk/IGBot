@@ -142,14 +142,16 @@ object WebBridge {
         val wv = WebSession.open("${WebSession.BASE}/${Uri.encode(uname)}/", ua, cookiesJson)
             ?: return result("timeout", "профіль не завантажився за 30 с")
         var st = JSONObject()
-        for (i in 1..16) {
+        for (i in 1..30) {
             delay(1000)
             st = WebSession.evalJson(wv, WebScripts.PROFILE_JS)
             if (st.optString("status", "wait") != "wait") break
-            // сітка постів рендериться ліниво (лише коли потрапляє у видиму область) — гортаємо вниз і назад
+            // Даємо повільній сторінці час відрендерити сітку та кілька разів запускаємо lazy loading.
             when (i) {
-                3, 7, 11, 15 -> WebSession.evalJs(wv, "window.scrollTo(0, 100000); 'ok'")
-                5, 9, 13 -> WebSession.evalJs(wv, "window.scrollTo(0, 0); 'ok'")
+                3, 8, 13, 18, 23, 28 ->
+                    WebSession.evalJs(wv, "window.scrollTo(0, document.body.scrollHeight); 'ok'")
+                5, 10, 15, 20, 25 ->
+                    WebSession.evalJs(wv, "window.scrollTo(0, 0); 'ok'")
             }
         }
         val status = st.optString("status", "wait").let { if (it == "wait") "unknown" else it }

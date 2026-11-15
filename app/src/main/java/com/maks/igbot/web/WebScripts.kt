@@ -88,11 +88,12 @@ internal object WebScripts {
             res.status = 'login';
             return JSON.stringify(res);
           }
-          var root = document.querySelector('main') || document;
-          var as = root.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]');
+          // Instagram може показувати сітку поза <main> або без кінцевого слеша в href.
+          var as = document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]');
           var codes = [];
           for (var i = 0; i < as.length && codes.length < 12; i++) {
-            var m = /\/(?:p|reel)\/([A-Za-z0-9_-]{8,15})\//.exec(as[i].getAttribute('href') || '');
+            var href = as[i].getAttribute('href') || '';
+            var m = /\/(?:p|reel)\/([A-Za-z0-9_-]{8,15})(?:\/|\?|#|$)/.exec(href);
             if (m && codes.indexOf(m[1]) < 0) codes.push(m[1]);
           }
           if (codes.length) {
@@ -120,17 +121,27 @@ internal object WebScripts {
             res.status = 'no_posts';
           }
           if (res.status === 'wait') {
-            // постів немає, а чому — невідомо: віддаємо діагностику (що під заголовком профілю і чи є дані в коді сторінки)
-            var mainEl = document.querySelector('main') || document.body;
-            var mt = ((mainEl && mainEl.innerText) || '').replace(/\s+/g, ' ');
-            res.tail = mt.slice(Math.max(0, mt.length - 140));
             try {
-              var h = document.documentElement.innerHTML;
-              var tk = h.match(/"taken_at":\d{9,11}/g);
-              res.diag = 'html=' + h.length + ' taken_at=' + (tk ? tk.length : 0);
+              // Резерв на випадок, коли React ще не вставив посилання на сітку в DOM.
+              var html = document.documentElement.innerHTML;
+              var mediaCodes = /"shortcode":"([A-Za-z0-9_-]{8,15})"/g;
+              var match;
+              while ((match = mediaCodes.exec(html)) && codes.length < 12) {
+                if (codes.indexOf(match[1]) < 0) codes.push(match[1]);
+              }
+              if (codes.length) {
+                res.status = 'ok';
+                res.codes = codes.join(',');
+                return JSON.stringify(res);
+              }
+              var takenAt = html.match(/"taken_at":\d{9,11}/g);
+              res.diag = 'html=' + html.length + ' taken_at=' + (takenAt ? takenAt.length : 0);
             } catch (e) {
               res.diag = 'html=?';
             }
+            var mainEl = document.querySelector('main') || document.body;
+            var mt = ((mainEl && mainEl.innerText) || '').replace(/\s+/g, ' ');
+            res.tail = mt.slice(Math.max(0, mt.length - 140));
           }
           return JSON.stringify(res);
         })();
