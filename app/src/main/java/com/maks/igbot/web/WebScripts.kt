@@ -105,7 +105,7 @@ internal object WebScripts {
             for (var j = 0; j < list.length; j++) { if (low.indexOf(list[j]) >= 0) return true; }
             return false;
           }
-          if (has(['this account is private', 'цей акаунт приватний', 'це приватний акаунт', 'это закрытый аккаунт',
+          if (has(['this account is private', 'this profile is private', 'цей акаунт приватний', 'це приватний акаунт', 'это закрытый аккаунт',
                    'dieses konto ist privat', 'esta cuenta es privada', 'ce compte est privé',
                    'questo account è privato', 'esta conta é privada', 'bu hesap gizli', 'to konto jest prywatne'])) {
             res.status = 'private';
