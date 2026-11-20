@@ -115,4 +115,22 @@ object BotEngine {
     /** Імпорт черги з JSON-файлу (команда export на ПК). Повертає {added, skipped, total}. */
     fun importTargets(context: Context, rawJson: String): JSONObject =
         JSONObject(module(context).callAttr("import_targets_json", rawJson).toString())
+
+    // ── мій профіль: підписники / підписки ──────────────────────────
+    /** Останній збережений знімок або null, якщо ще не завантажували. */
+    fun friendsCached(context: Context): JSONObject? {
+        val raw = module(context).callAttr("friends_get_cached").toString()
+        return if (raw.isBlank()) null else JSONObject(raw)
+    }
+
+    /** Повне оновлення (кілька хвилин на великих акаунтах). {ok, error?} */
+    fun friendsRefresh(context: Context): JSONObject =
+        JSONObject(module(context).callAttr("friends_refresh").toString())
+
+    fun friendsProgress(context: Context): JSONObject =
+        JSONObject(module(context).callAttr("friends_progress").toString())
+
+    /** action = "follow" | "unfollow". status: ok | requested | blocked | rate_limited | login | error */
+    fun friendsAction(context: Context, action: String, pk: Long, username: String): JSONObject =
+        JSONObject(module(context).callAttr("friends_action", action, pk, username).toString())
 }

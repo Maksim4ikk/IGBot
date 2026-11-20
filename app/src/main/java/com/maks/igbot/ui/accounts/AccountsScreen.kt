@@ -31,7 +31,7 @@ import kotlinx.coroutines.withContext
 // ВКЛАДКА 4: АКАУНТИ (вхід через Instagram)
 // ════════════════════════════════════════════════════════════════════
 @Composable
-fun AccountsScreen(context: Context) {
+internal fun AccountsMain(context: Context, onOpenMain: () -> Unit) {
     val scope = rememberCoroutineScope()
 
     var mainUser by remember { mutableStateOf("") }
@@ -113,7 +113,8 @@ fun AccountsScreen(context: Context) {
             proxy = mainProxy,
             onProxyChange = { mainProxy = it },
             onLogin = { startLogin("main") },
-            onLogout = { logout("main") }
+            onLogout = { logout("main") },
+            onOpen = onOpenMain
         )
 
         AccountCard(

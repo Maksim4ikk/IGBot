@@ -18,10 +18,17 @@ from igbot.runtime import (
     save_settings_json,
     unlock_all,
 )
+from igbot.friends import (
+    friends_action,
+    friends_get_cached,
+    friends_progress,
+    friends_refresh,
+)
 
 __all__ = [
     "clear_counter", "clear_logs", "get_dashboard_json", "get_logs_json", "get_settings_json",
     "import_targets_json", "init_android_env", "logout_account", "register_account",
     "save_settings_json", "start_scraper_thread", "start_worker_thread", "stop_scraper_thread",
-    "stop_worker_thread", "unlock_all",
+    "stop_worker_thread", "unlock_all", "friends_action", "friends_get_cached", "friends_progress",
+    "friends_refresh",
 ]

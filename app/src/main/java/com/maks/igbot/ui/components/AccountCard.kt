@@ -29,6 +29,8 @@ import androidx.compose.ui.unit.sp
 import com.maks.igbot.ui.theme.AppSuccess
 import com.maks.igbot.ui.theme.BrandAccent
 import com.maks.igbot.ui.theme.BrandPrimaryDark
+import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material3.OutlinedButton
 
 /** Картка акаунта: аватар з першою літерою нікнейма, статус підключення, вхід/вихід і проксі. */
 @Composable
@@ -39,7 +41,8 @@ fun AccountCard(
     proxy: String,
     onProxyChange: (String) -> Unit,
     onLogin: () -> Unit,
-    onLogout: () -> Unit
+    onLogout: () -> Unit,
+    onOpen: (() -> Unit)? = null
 ) {
     AppCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -71,6 +74,14 @@ fun AccountCard(
                 text = if (loggedIn) "Підключено" else "Немає входу",
                 color = if (loggedIn) AppSuccess else MaterialTheme.colorScheme.onSurfaceVariant
             )
+        }
+
+        if (loggedIn && onOpen != null) {
+            OutlinedButton(onClick = onOpen, modifier = Modifier.fillMaxWidth().height(48.dp)) {
+                Icon(Icons.Default.AccountCircle, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Відкрити акаунт")
+            }
         }
 
         Button(onClick = onLogin, modifier = Modifier.fillMaxWidth().height(48.dp)) {
