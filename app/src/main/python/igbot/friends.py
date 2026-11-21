@@ -1,7 +1,10 @@
 """Мій профіль (основний акаунт): підписники, підписки, взаємність, підписатись / відписатись.
 
-Усе робимо HTTP-клієнтом із сесією основного акаунта (так само, як парсер читає підписників донора).
-Запити з WebView (fetch) для профілю та підписки/відписки Instagram віддавав як HTML-сторінку, тому тут їх немає.
+Списки та дані профілю читаємо HTTP-клієнтом із сесією основного акаунта (так само, як парсер читає
+підписників донора). Підписку/відписку виконує WebView (com.maks.igbot.web.WebApi): відкриває сторінку
+профілю й натискає кнопки, як людина — так само працює лайк. Запити до /api/v1 зсередини WebView
+(fetch) Instagram віддавав як HTML-сторінку / 404, тому їх тут немає. Якщо на сторінці не знайшлося
+кнопки, дію ще раз пробуємо HTTP-запитом.
 
 Усі публічні функції повертають JSON-рядок — їх викликає Kotlin через BotEngine.
 """
@@ -25,6 +28,7 @@ from .instagram_client import WebInstaClient
 from .settings import Settings
 from .state import log
 
+WEB_API_CLASS = "com.maks.igbot.web.WebApi"
 CACHE_FILE = "friends_cache.json"
 PAGE_SIZE = 100
 MAX_PAGES = 800          # запобіжник від нескінченного циклу (≈80 000 акаунтів)
@@ -131,7 +135,7 @@ def _profile_info(cl: WebInstaClient, uid: str) -> dict:
 
 def _fetch_users(cl: WebInstaClient, uid: str, kind: str):
     """Повний список підписників/підписок. kind: followers | following.
-    Повертає ([[pk, username, full_name], ...], дочитано_до_кінця)."""
+    Повертає ([[pk, username, full_name, profile_pic_url], ...], дочитано_до_кінця)."""
     out, seen, max_id = [], set(), ""
     for _ in range(MAX_PAGES):
         url = f"{cl.API}/friendships/{uid}/{kind}/?count={PAGE_SIZE}"
@@ -144,7 +148,12 @@ def _fetch_users(cl: WebInstaClient, uid: str, kind: str):
             if pk in seen:
                 continue
             seen.add(pk)
-            out.append([pk, u.get("username", ""), u.get("full_name", "") or ""])
+            out.append([
+                pk,
+                u.get("username", ""),
+                u.get("full_name", "") or "",
+                u.get("profile_pic_url", "") or "",
+            ])
         PROGRESS["done"] = len(out)
         nxt = data.get("next_max_id") or ""
         if not nxt:
@@ -199,6 +208,7 @@ def friends_refresh() -> str:
             "complete": not warnings,
             "warning": "; ".join(warnings),
             "updated_at": int(time.time()),
+            "avatar_schema_version": 1,
         }
         with _CACHE_LOCK:
             _write_cache(snap)
@@ -221,12 +231,14 @@ def friends_get_cached() -> str:
         data = _read_cache()
     if not data or data.get("username") != cfg.main_username.strip():
         return ""
+    # Older caches only stored usernames and cannot display list avatars.
+    if data.get("avatar_schema_version") != 1:
+        return ""
     return _j(data)
 
 
 def friends_progress() -> str:
     return _j(PROGRESS)
-
 
 
 # ── підписатись / відписатись ───────────────────────────────────────
@@ -258,45 +270,88 @@ def _update_cache(username: str, action: str, pk: int, user_name: str) -> None:
                 data["following_count"] = max(0, int(data.get("following_count", len(following))) - 1)
             data["following"] = kept
         elif not any(r[0] == pk for r in following):
-            full = next((r[2] for r in (data.get("followers") or []) if r[0] == pk), "")
-            following.insert(0, [pk, user_name, full])
+            follower = next((r for r in (data.get("followers") or []) if r[0] == pk), [])
+            full = follower[2] if len(follower) > 2 else ""
+            pic = follower[3] if len(follower) > 3 else ""
+            following.insert(0, [pk, user_name, full, pic])
             data["following"] = following
             data["following_count"] = int(data.get("following_count", len(following) - 1)) + 1
         _write_cache(data)
 
 
+def _web_friend_action(action: str, username: str, cl: WebInstaClient, cfg: Settings) -> dict:
+    """Підписка / відписка через WebView: відкриває профіль @username і натискає кнопки.
+    Повертає {"status": ok|requested|blocked|login|not_found|no_button|not_confirmed|timeout|error, "detail": ...}."""
+    try:
+        from java import jclass  # доступно лише в Chaquopy (Android)
+    except ImportError as e:
+        raise StopWork("Ця функція працює лише в Android-застосунку") from e
+    cookies = json.dumps({c.name: c.value for c in cl.session.cookies if c.value})
+    try:
+        raw = jclass(WEB_API_CLASS).friendAction(action, username, (cfg.web_user_agent or "").strip(), cookies)
+    except UnicodeError as e:  # напр. обрізаний посередині емодзі в тексті сторінки
+        return {"status": "error", "detail": f"некоректний текст від WebView: {e}"}
+    try:
+        data = json.loads(str(raw))
+        return data if isinstance(data, dict) else {"status": "error", "detail": "несподівана відповідь"}
+    except ValueError:
+        return {"status": "error", "detail": "некоректна відповідь WebView"}
+
+
+def _api_action(cl: WebInstaClient, action: str, pk: int, who: str, title: str) -> dict:
+    """Запасний шлях: той самий запит, що робить сайт (HTTP-клієнт із сесією акаунта)."""
+    endpoint = "destroy" if action == "unfollow" else "create"
+    try:
+        data = cl._req(
+            "POST", f"{cl.API}/friendships/{endpoint}/{pk}/",
+            delay=(0.3, 0.8), context=f"{title.lower()} {who}",
+            headers={"X-Instagram-AJAX": "1", "Content-Type": "application/x-www-form-urlencoded"},
+            data={"container_module": "profile", "user_id": str(pk)},
+        )
+        return _interpret(action, data)
+    except PleaseWaitFewMinutes as e:
+        return {"status": "rate_limited", "detail": str(e)}
+    except (FeedbackRequired, ChallengeRequired) as e:
+        return {"status": "blocked", "detail": str(e)}
+    except LoginRequired as e:
+        return {"status": "login", "detail": str(e)}
+    except (ApiError, UserNotFound) as e:
+        return {"status": "error", "detail": str(e)}
+
+
 def friends_action(action: str, pk: int, username: str = "") -> str:
     """action: follow | unfollow.
-    Повертає {"status": ok | requested | blocked | rate_limited | login | error, "detail": ...}."""
+    Повертає {"status": ok | requested | blocked | rate_limited | login | error, "detail": ...}.
+    Спершу дію робить WebView на сторінці профілю; лише якщо кнопки там не знайшлося — HTTP-запит."""
     who = f"@{username}" if username else str(pk)
     title = "Відписка" if action == "unfollow" else "Підписка"
     try:
         if action not in ("follow", "unfollow"):
             raise ValueError(f"невідома дія {action}")
         pk = int(pk)
+        username = (username or "").strip().lstrip("@")
         cfg = Settings.load()
         cl, me, _uid = _client(cfg)
-        endpoint = "destroy" if action == "unfollow" else "create"
-        try:
-            data = cl._req(
-                "POST", f"{cl.API}/friendships/{endpoint}/{pk}/",
-                delay=(0.3, 0.8), context=f"{title.lower()} {who}",
-                headers={"X-Instagram-AJAX": "1", "Content-Type": "application/x-www-form-urlencoded"},
-                data={"container_module": "profile", "user_id": str(pk)},
-            )
-            out = _interpret(action, data)
-        except PleaseWaitFewMinutes as e:
-            out = {"status": "rate_limited", "detail": str(e)}
-        except (FeedbackRequired, ChallengeRequired) as e:
-            out = {"status": "blocked", "detail": str(e)}
-        except LoginRequired as e:
-            out = {"status": "login", "detail": str(e)}
-        except (ApiError, UserNotFound) as e:
-            out = {"status": "error", "detail": str(e)}
+
+        out = None
+        if _USERNAME_RE.fullmatch(username):
+            res = _web_friend_action(action, username, cl, cfg)
+            status, detail = str(res.get("status", "error")), str(res.get("detail", ""))
+            if status in ("ok", "requested", "blocked", "login"):
+                out = {"status": status, "detail": detail}
+            elif status in ("no_button", "timeout"):
+                log.info("[Профіль] %s: %s — на сторінці кнопки не знайдено (%s: %s), пробую через API",
+                         title, who, status, detail[:200])
+            else:
+                out = {"status": "error", "detail": f"{status}: {detail}"[:300]}
+        if out is None:
+            out = _api_action(cl, action, pk, who, title)
 
         if out["status"] == "ok":
             _update_cache(me, action, pk, username)
-            log.info("[Профіль] %s: %s — готово", title, who)
+            log.info("[Профіль] %s: %s — готово%s", title, who, " (так і було)" if out["detail"] == "already" else "")
+        elif out["status"] == "requested":
+            log.info("[Профіль] %s: %s — приватний акаунт, запит надіслано", title, who)
         else:
             log.warning("[Профіль] %s: %s — %s (%s)", title, who, out["status"], out["detail"])
         return _j(out)

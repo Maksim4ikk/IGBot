@@ -28,7 +28,7 @@ object FriendsKind {
     const val NOT_FOLLOWING_ME = "not_following_me"      // я на них підписаний, а вони на мене — ні
 }
 
-data class FriendUser(val pk: Long, val username: String, val fullName: String)
+data class FriendUser(val pk: Long, val username: String, val fullName: String, val picUrl: String = "")
 
 data class FriendsSnapshot(
     val username: String,
@@ -192,7 +192,7 @@ object FriendsRepository {
             val a = o.optJSONArray(key) ?: return emptyList()
             return List(a.length()) { i ->
                 val r = a.getJSONArray(i)
-                FriendUser(r.getLong(0), r.optString(1), r.optString(2))
+                FriendUser(r.getLong(0), r.optString(1), r.optString(2), r.optString(3))
             }
         }
         return FriendsSnapshot(

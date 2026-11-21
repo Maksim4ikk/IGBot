@@ -1,7 +1,6 @@
 package com.maks.igbot.ui.accounts
 
 import android.content.Context
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,7 +15,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
@@ -44,8 +42,6 @@ import com.maks.igbot.data.listFor
 import com.maks.igbot.ui.components.AppCard
 import com.maks.igbot.ui.components.ConfirmDialog
 import com.maks.igbot.ui.components.InfoNote
-import com.maks.igbot.ui.theme.BrandAccent
-import com.maks.igbot.ui.theme.BrandPrimaryDark
 
 private const val BATCH_SIZE = 50
 
@@ -68,6 +64,10 @@ fun FriendsListScreen(context: Context, kind: String, onBack: () -> Unit) {
     // «Знімок» складу списку на момент входу на екран: після підписки/відписки рядок не зникає,
     // а лише змінює кнопку (так можна одразу скасувати). Перераховується після оновлення даних.
     val rows = remember(kind, snap?.updatedAt) { FriendsRepository.state.value.listFor(kind) }
+    var newestFirst by remember(kind) { mutableStateOf(true) }
+    val displayRows = remember(rows, newestFirst) {
+        if (newestFirst) rows.asReversed() else rows
+    }
 
     val canBatch = kind == FriendsKind.FOLLOWING || kind == FriendsKind.NOT_FOLLOWING_ME
     // Список «не підписані на мене» — це різниця двох списків: якщо один із них неповний, вона бреше
@@ -80,12 +80,13 @@ fun FriendsListScreen(context: Context, kind: String, onBack: () -> Unit) {
     if (confirm) {
         ConfirmDialog(
             title = "Відписатись від $n акаунтів?",
-            text = "Бот відпишеться від перших $n акаунтів цього списку. Між відписками пауза 4–9 с " +
-                "(орієнтовно ${(n * 6.5 / 60).toInt().coerceAtLeast(1)} хв). Зупинити можна будь-коли.",
+            text = "Бот по черзі відкриє профіль кожного з перших $n акаунтів цього списку й натисне «Відписатись». " +
+                "Між відписками пауза 4–9 с, разом орієнтовно ${(n * 25 / 60).coerceAtLeast(1)} хв. " +
+                "Зупинити можна будь-коли.",
             confirmLabel = "Відписатись",
             onConfirm = {
                 confirm = false
-                FriendsRepository.unfollowBatch(context, rows, BATCH_SIZE)
+                FriendsRepository.unfollowBatch(context, displayRows, BATCH_SIZE)
             },
             onDismiss = { confirm = false }
         )
@@ -93,6 +94,21 @@ fun FriendsListScreen(context: Context, kind: String, onBack: () -> Unit) {
 
     Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         ScreenTopBar(title, "$subtitle · ${formatCount(rows.size)}", onBack)
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            androidx.compose.material3.FilterChip(
+                selected = newestFirst,
+                onClick = { newestFirst = true },
+                label = { Text("Спочатку нові", maxLines = 1) },
+                modifier = Modifier.weight(1f)
+            )
+            androidx.compose.material3.FilterChip(
+                selected = !newestFirst,
+                onClick = { newestFirst = false },
+                label = { Text("Спочатку старі", maxLines = 1) },
+                modifier = Modifier.weight(1f)
+            )
+        }
 
         if (state.loading) {
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
@@ -147,7 +163,7 @@ fun FriendsListScreen(context: Context, kind: String, onBack: () -> Unit) {
             }
         } else {
             LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                items(rows, key = { it.pk }) { user ->
+                items(displayRows, key = { it.pk }) { user ->
                     FriendRow(
                         user = user,
                         following = user.pk in state.followingPks,
@@ -175,17 +191,11 @@ private fun FriendRow(
         modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(
-            modifier = Modifier.size(44.dp).background(BrandAccent, CircleShape),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                user.username.firstOrNull()?.uppercase() ?: "?",
-                fontWeight = FontWeight.Bold,
-                fontSize = 18.sp,
-                color = BrandPrimaryDark
-            )
-        }
+        AccountAvatar(
+            url = user.picUrl,
+            letter = user.username.firstOrNull()?.uppercase() ?: "?",
+            size = 44.dp
+        )
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(

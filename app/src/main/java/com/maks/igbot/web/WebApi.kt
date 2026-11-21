@@ -1,116 +1,122 @@
 package com.maks.igbot.web
 
-import android.webkit.CookieManager
+import android.net.Uri
 import android.webkit.WebView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.json.JSONTokener
 
 /**
- * Запит до Instagram зсередини спільного WebView — рівно те, що робить сайт у браузері
- * (свої куки, свій TLS-відбиток). Викликається з Python (igbot/friends.py):
- *   jclass("com.maks.igbot.web.WebApi").request(method, path, body, userAgent, cookiesJson)
+ * Підписка / відписка на сторінці профілю в спільному WebView: відкриває https://www.instagram.com/<нік>/,
+ * натискає кнопки й перевіряє результат — так само, як працює лайк (WebBridge.like).
+ * Запити /api/v1 зсередини WebView (fetch) Instagram віддавав як HTML / 404, тому ними не користуємось.
  *
- * Повертає JSON {"status": HTTP-код | -1 помилка JS/мережі | -2 таймаут | -3 заборонено, "body": "...", "error": "..."}.
- * Дозволені лише GET/POST на /api/v1/..., тому цим мостом не можна відкрити довільну адресу.
- * Спільний mutex WebSession серіалізує виклики з воркером і парсером.
+ * Викликається з Python (igbot/friends.py):
+ *   jclass("com.maks.igbot.web.WebApi").friendAction(action, username, userAgent, cookiesJson)
+ *
+ * Повертає JSON {"status": ..., "detail": ...}.
+ * status: ok | requested | blocked | login | not_found | no_button | not_confirmed | timeout | error
+ * Спільний mutex WebSession серіалізує дію з воркером і парсером.
  */
 object WebApi {
-    private const val ALLOWED_PREFIX = "/api/v1/"
-    private const val POLL_STEP_MS = 400L
-    private const val POLL_TRIES = 75 // ≈ 30 с
+    private val USERNAME_RE = Regex("[A-Za-z0-9._]{1,30}")
 
-    @Volatile
-    private var lastWv: WebView? = null
-
+    /** action = "follow" | "unfollow". Блокує потік Python до завершення (кілька секунд). */
     @JvmStatic
-    fun request(method: String, path: String, body: String, userAgent: String, cookiesJson: String): String =
-        runBlocking(Dispatchers.IO) { doRequest(method, path, body, userAgent, cookiesJson) }
-
-    private suspend fun doRequest(
-        method: String,
-        path: String,
-        body: String,
-        userAgent: String,
-        cookiesJson: String
-    ): String {
-        val m = method.uppercase()
-        if (m != "GET" && m != "POST") return reply(-3, "", "метод не підтримується")
-        if (!path.startsWith(ALLOWED_PREFIX) || path.contains("..") || path.any { it == '\n' || it == '\r' }) {
-            return reply(-3, "", "шлях не дозволено")
-        }
-        val wantedUid = try {
-            JSONObject(cookiesJson).optString("ds_user_id")
+    fun friendAction(action: String, username: String, userAgent: String, cookiesJson: String): String =
+        try {
+            runBlocking(Dispatchers.IO) {
+                WebSession.mutex.withLock { doFriendAction(action, username, userAgent, cookiesJson) }
+            }
         } catch (e: Exception) {
-            ""
+            reply("error", "${e::class.simpleName}: ${e.message}")
         }
 
-        return WebSession.mutex.withLock {
-            var wv = lastWv
-            if (wv == null || !onInstagram(wv, wantedUid)) {
-                wv = WebSession.open(WebSession.BASE + "/", userAgent, cookiesJson)
-                    ?: return@withLock reply(-2, "", "сторінка Instagram не завантажилась за 30 с")
-                lastWv = wv
-                delay(2500) // даємо сторінці виставити csrftoken та ініціалізуватись
+    private suspend fun doFriendAction(action: String, username: String, ua: String, cookiesJson: String): String {
+        if (action != "follow" && action != "unfollow") return reply("error", "невідома дія: $action")
+        val unfollow = action == "unfollow"
+        val uname = username.trim().trimStart('@')
+        if (!USERNAME_RE.matches(uname)) return reply("error", "невірний нікнейм: $uname")
+
+        val wv = WebSession.open("${WebSession.BASE}/${Uri.encode(uname)}/", ua, cookiesJson)
+            ?: return reply("timeout", "профіль не завантажився за 30 с")
+
+        // 1) чекаємо, поки в шапці профілю з'явиться кнопка підписки
+        var st = WebSession.poll(
+            wv, FriendScripts.STATE_JS, 15,
+            { it.optBoolean("login") || it.optBoolean("missing") || it.optString("state") != "none" }
+        )
+        if (st.optBoolean("login")) return reply("login", st.optString("title"))
+        if (st.optBoolean("missing")) return reply("not_found", "акаунт недоступний: ${detail(st)}")
+        val before = st.optString("state")
+        if (before == "none") return reply("no_button", detail(st))
+
+        // 2) уже в потрібному стані — нічого не натискаємо
+        if (unfollow && before == "follow") return reply("ok", "already")
+        if (!unfollow && before == "following") return reply("ok", "already")
+        if (!unfollow && before == "requested") return reply("requested", "already")
+
+        // 3) головна кнопка шапки
+        if (clickJs(wv, FriendScripts.CLICK_MAIN_JS) != "clicked") return reply("no_button", detail(st))
+
+        // 4) відписка: у меню та (для приватних акаунтів) у діалозі підтвердження натискаємо «Відписатись»
+        if (unfollow) {
+            for (round in 1..3) {
+                delay(1300)
+                if (clickJs(wv, FriendScripts.CLICK_UNFOLLOW_JS) != "clicked") break
+                delay(1200)
+                st = WebSession.evalJson(wv, FriendScripts.STATE_JS)
+                if (st.optString("state") == "follow") break
             }
-            execute(wv, m, path, body)
+        }
+
+        // 5) перевіряємо, що кнопка змінила стан
+        val wanted = if (unfollow) setOf("follow") else setOf("following", "requested")
+        if (st.optString("state") !in wanted) {
+            st = WebSession.poll(wv, FriendScripts.STATE_JS, 8, { it.optString("state") in wanted })
+        }
+        val after = st.optString("state")
+        return when {
+            !unfollow && after == "requested" -> reply("requested", "")
+            after in wanted -> reply("ok", "")
+            st.optBoolean("blocked") -> reply("blocked", detail(st))
+            else -> reply("not_confirmed", "було=$before стало=$after ${detail(st)}")
         }
     }
 
-    /** Чи WebView уже на instagram.com, не на екрані входу і з куками саме потрібного акаунта. */
-    private suspend fun onInstagram(wv: WebView, wantedUid: String): Boolean =
-        withContext(Dispatchers.Main) {
-            val url = wv.url.orEmpty()
-            if (!url.startsWith(WebSession.BASE) || url.contains("/accounts/login")) return@withContext false
-            val cookie = CookieManager.getInstance().getCookie(WebSession.BASE).orEmpty()
-            if (!cookie.contains("sessionid=")) return@withContext false
-            val currentUid = Regex("ds_user_id=(\\d+)").find(cookie)?.groupValues?.get(1).orEmpty()
-            wantedUid.isBlank() || currentUid == wantedUid
-        }
+    private suspend fun clickJs(wv: WebView, script: String): String =
+        (JSONTokener(WebSession.evalJs(wv, script)).nextValue() as? String).orEmpty()
 
-    private suspend fun execute(wv: WebView, method: String, path: String, body: String): String {
-        val key = "__igb_" + System.nanoTime()
-        val js = """
-            (function () {
-              window.$key = null;
-              var m = document.cookie.match(/(?:^|; )csrftoken=([^;]+)/);
-              var headers = {
-                'X-IG-App-ID': '936619743392459',
-                'X-ASBD-ID': '129477',
-                'X-IG-WWW-Claim': '0',
-                'X-Requested-With': 'XMLHttpRequest',
-                'X-CSRFToken': m ? m[1] : ''
-              };
-              var opts = {method: ${JSONObject.quote(method)}, credentials: 'include', headers: headers};
-              if (opts.method === 'POST') {
-                headers['Content-Type'] = 'application/x-www-form-urlencoded';
-                opts.body = ${JSONObject.quote(body)};
-              }
-              fetch(${JSONObject.quote(path)}, opts)
-                .then(function (r) { return r.text().then(function (t) { return {status: r.status, body: t}; }); })
-                .then(function (o) { window.$key = JSON.stringify(o); })
-                .catch(function (e) { window.$key = JSON.stringify({status: -1, body: '', error: String(e)}); });
-              return 'started';
-            })();
-        """.trimIndent()
+    private fun detail(st: JSONObject): String =
+        "title=${st.optString("title")} path=${st.optString("path")} labels=${st.optString("labels")} " +
+            "dialog=${st.optString("dialog")} text=${st.optString("text")}"
 
-        WebSession.evalJs(wv, js)
-        repeat(POLL_TRIES) {
-            delay(POLL_STEP_MS)
-            val raw = WebSession.evalJs(wv, "window.$key")
-            val result = JSONTokener(raw).nextValue() as? String
-            if (result != null) {
-                WebSession.evalJs(wv, "delete window.$key")
-                return result
+    private fun reply(status: String, detail: String): String =
+        JSONObject().put("status", status).put("detail", clean(detail)).toString()
+
+    /** Прибирає «осиротілі» сурогати (напр. емодзі, обрізаний посередині), щоб Python не впав на UnicodeError. */
+    private fun clean(s: String): String {
+        val sb = StringBuilder(s.length)
+        var i = 0
+        while (i < s.length) {
+            val c = s[i]
+            if (Character.isHighSurrogate(c)) {
+                if (i + 1 < s.length && Character.isLowSurrogate(s[i + 1])) {
+                    sb.append(c).append(s[i + 1])
+                    i += 2
+                } else {
+                    i++
+                }
+            } else if (Character.isLowSurrogate(c)) {
+                i++
+            } else {
+                sb.append(c)
+                i++
             }
         }
-        return reply(-2, "", "таймаут запиту (30 с)")
+        return sb.toString()
     }
-
-    private fun reply(status: Int, body: String, error: String): String =
-        JSONObject().put("status", status).put("body", body).put("error", error).toString()
 }
